@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import pyvisa as visa
+from ace_client import limit_vpp_offset, MAX_INPUT_RANGE
 
 class B2912A:
     # Agilent/Keysight B2912A SMU driver over LAN (TCPIP) using PyVISA. Connect via VISA resource string: 'TCPIP0::<IP>::inst0::INSTR'
@@ -14,16 +15,26 @@ class B2912A:
     # param voltage: Output voltage in volts
     # param current_limit: Compliance current in amps
     # param range_mode: 'AUTO', 'BEST', or 'FIXED'
-    def set_voltage(self, voltage: float, current_limit: float = 0.01, range_mode: str = 'AUTO'):
-        # Set source mode to voltage
-        self.smu.write('SOUR:FUNC VOLT')
-        # Set compliance (current limit)
-        self.smu.write(f'SENS:CURR:PROT {current_limit}')
-        # Set source range
-        self.smu.write(f'SOUR:VOLT:RANG {range_mode}')
-        # Apply voltage
-        self.smu.write(f'SOUR:VOLT {voltage}')
+    def set_voltage(self,
+                    voltage: float,
+                    current_limit: float = 0.01,
+                    range_mode: str = 'AUTO'):
+        # “0 Vpp” sine with this offset → see if it’s legal
+        allowed_vpp = limit_vpp_offset(requested_vpp=0.0,
+                                       offset=voltage)
 
+        # If allowed_vpp < 0 then abs(offset) > max_input, so clamp
+        if allowed_vpp < 0:
+            safe_v = MAX_INPUT_RANGE if voltage >= 0 else -MAX_INPUT_RANGE
+        else:
+            safe_v = voltage
+
+        # SCPI
+        self.smu.write('SOUR:FUNC VOLT')
+        self.smu.write(f'SENS:CURR:PROT {current_limit}')
+        self.smu.write(f'SOUR:VOLT:RANG {range_mode}')
+        self.smu.write(f'SOUR:VOLT {safe_v}')
+        
     # Enable the SMU output
     def output_on(self):
         self.smu.write('OUTP ON')

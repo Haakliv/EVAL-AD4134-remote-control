@@ -1,5 +1,5 @@
 from zolve_instruments import Sdg6022x
-from ace_client import limit_vpp_offset
+from ace_client import limit_vpp_offset, MAX_INPUT_RANGE
 
 # Wrapper for Siglent SDG6022X to configure and control output waveforms. Supports sine and pulse with safe amplitude limiting.
 class WaveformGenerator:
@@ -12,7 +12,18 @@ class WaveformGenerator:
     # param amplitude: Peak-to-peak voltage in Vpp
     # param offset: DC offset in V
     def sine(self, channel, frequency, amplitude, offset):
-        safe_vpp = limit_vpp_offset(amplitude, offset)
+        max_in = MAX_INPUT_RANGE
+        if abs(offset) > max_in:
+            old = offset
+            offset = max_in if offset > 0 else -max_in
+            print(f"Warning: offset {old}V outside ±{max_in}V, clamped to {offset}V")
+
+        safe_vpp = limit_vpp_offset(amplitude, offset, max_input=max_in)
+        if safe_vpp <= 0:
+            raise ValueError(
+                f"Offset={offset} V already at rail ±{max_in} V—no headroom for any Vpp!"
+            )
+
         self.sdg.set_waveform('SINE', channel)
         self.sdg.set_frequency(frequency, channel)
         self.sdg.set_amplitude(safe_vpp, channel)
