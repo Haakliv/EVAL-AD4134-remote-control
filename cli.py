@@ -320,66 +320,45 @@ def main():
             
     # ------------------- DC gain/offset -------------------
     elif args.cmd == 'dc-gain':
-        print('=== DC Gain and Offset Test ===')
+        print('=== DC Gain and Offset Test (using SMU sweep) ===')
         print(f"SMU LAN resource: {args.resource}")
-        print(f"Voltages: {args.voltages}")
-        if args.no_board:
-            print('--no-board: skipping ADC capture')
+        vs = args.voltages
+        start, stop = vs[0], vs[-1]
+        points = len(vs)
+        print(f"Sweeping from {start:.6f} V to {stop:.6f} V in {points} steps")
 
-        # Build capture params
-        capture_kwargs = dict(
-            ace_host=args.ace_host,
-            sample_count=args.samples,
-            scale=ADC_LSB,
-            odr_code=args.odr_code,
-            filter_code=args.filter_code,
-        )
+        trigger_delay = 0.2
 
-        # Initialize SMU over LAN
         smu = B2912A(args.resource)
-        applied = []
-        adc_readings = []
-
-        for V in args.voltages:
-            print(f"\nApplying {V:.6f} V...")
-            smu.set_voltage(V, current_limit=0.01, range_mode='AUTO')
-            smu.output_on()
-            time.sleep(0.2)
-
-            if not args.no_board:
-                raw = capture_samples(**capture_kwargs)
-                v_meas = np.mean(raw)
-                print(f"ADC mean: {v_meas:.6f} V")
-                if args.plot:
-                    from plotting import plot_histogram
-                    fname = f"hist_{V:.6f}.png"
-                    plot_histogram(raw,
-                                   bins=args.hist_bins,
-                                   out_file=fname,
-                                   show=args.show)
-                    print(f"Histogram saved to {fname}")
-            else:
-                v_meas = None
-
-            smu.output_off()
-            applied.append(V)
-            adc_readings.append(v_meas)
-
+        smu.sweep_voltage(
+            start=start,
+            stop=stop,
+            points=points,
+            current_limit=0.01,
+            range_mode='AUTO',
+            trigger_count=1,
+            trigger_delay=trigger_delay,
+            trigger_period=None      # Immediate next point after delay
+        )
+        # Wait for completion
+        smu.smu.query('*OPC?')
+        # Pull back the measured values
+        readings = smu.smu.query_ascii_values('TRACE:DATA?')
         smu.close()
 
+        # Print summary
         print('\n--- Summary ---')
-        print('Applied(V)   ADC(V)')
-        for a, m in zip(applied, adc_readings):
-            print(f"{a:10.6f}   {m or 'N/A':>8}")
+        print('Applied(V)   Measured(V)')
+        for a, m in zip(vs, readings):
+            print(f"{a:10.6f}   {m:10.6f}")
 
-        if args.no_board:
-             print("\n--no-board: skipping gain/offset calculation")
-             return
-
-        # Compute gain/offset
-        results = compute_dc_gain_offset(applied, None, adc_readings)
-        print(f"\nGain: {results['gain']:.6f}, Offset: {results['offset']:.6f}, R2: {results['r2']:.4f}")
+        # Compute gain & offset
+        results = compute_dc_gain_offset(vs, None, readings)
+        print(f"\nGain: {results['gain']:.6f}, "
+              f"Offset: {results['offset']:.6f}, "
+              f"R2: {results['r2']:.4f}")
         return
+
 
     print("Unknown command. Use -h for help.")
 
