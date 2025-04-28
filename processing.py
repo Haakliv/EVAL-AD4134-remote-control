@@ -102,3 +102,25 @@ def compute_bandwidth(freqs, gains, db_down=3):
         if g <= cutoff_lin:
             return f
     return freqs[-1]
+
+
+def compute_dc_gain_offset(applied, verified, adc):
+    """
+    Compute DC gain and offset errors from test data.
+
+    :param applied: sequence of nominal voltages applied by SMU
+    :param verified: sequence of actual voltages measured by DMM (or None)
+    :param adc: sequence of voltages read by the ADC
+    :return: dict with keys 'gain', 'offset', and fit R^2
+    """
+    # Use the verified values if provided, else use applied
+    x = np.array(verified) if verified[0] is not None else np.array(applied)
+    y = np.array(adc)
+    # Linear fit y = m*x + b
+    m, b = np.polyfit(x, y, 1)
+    # Goodness of fit
+    y_pred = m * x + b
+    ss_res = np.sum((y - y_pred)**2)
+    ss_tot = np.sum((y - np.mean(y))**2)
+    r2 = 1 - ss_res/ss_tot
+    return {'gain': m, 'offset': b, 'r2': r2}

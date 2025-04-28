@@ -2,6 +2,7 @@
 import argparse
 import numpy as np
 import os
+import time
 
 from ace_client import (
     ACEClient,
@@ -11,13 +12,15 @@ from ace_client import (
     ADC_RES_BITS,
 )
 from generator import WaveformGenerator
-from acquisition import capture_samples, read_raw_samples
+from b2912a_source import B2912A
+from acquisition import capture_samples, read_raw_samples, measure_dmm
 from processing import (
     compute_noise_floor_metrics,
     fft_spectrum,
     compute_metrics,
     compute_settling_time,
     compute_bandwidth,
+    compute_dc_gain_offset,
 )
 from plotting import (
     plot_raw,
@@ -40,6 +43,9 @@ SAMPLES_DEFAULT      = 131_072
 HIST_BINS_DEFAULT    = 100
 SETTLING_THRESH_FRAC = 0.01
 SWEEP_POINTS_DEFAULT = 50
+
+# === Agilent Defaults ===
+AGILENT_DEFAULT_RSRC = 'USB0::0x0957::0x8E18::MY123456::INSTR'
 
 
 def add_common_adc_args(parser):
@@ -163,6 +169,20 @@ def setup_parsers():
     )
     add_common_adc_args(fr)
     add_common_plot_args(fr)
+
+    # -- dc-gain ----------------------------------------------------------
+    dcg = subs.add_parser('dc-gain', help='DC gain and offset test')
+    dcg.add_argument('voltages', nargs='+', type=float,
+                     help='DC voltages to apply (in volts)')
+    dcg.add_argument('--resource', type=str,
+                     default=AGILENT_DEFAULT_RSRC,
+                     help='VISA resource string for B2912A')
+    dcg.add_argument('-no-board', dest='no_board', action='store_true',
+                     help='Skip board ADC capture verification step')
+
+    # ADC capture arguments
+    add_common_adc_args(dcg)
+    add_common_plot_args(dcg)
 
     return parser
 
@@ -291,7 +311,76 @@ def main():
             plot_freq_response(freqs, gains,
                                out_file = args.plot and f"freq_resp_{args.points}.png",
                                show     = args.show)
+            
+    # ------------------- dc-gain -------------------
+    if args.cmd == 'dc-gain':
+        print("Starting DC gain and offset test...")
+        print(f"Applying voltages: {args.voltages}")
+        print(f"Using SMU resource: {args.resource}")
+        if args.no_board:
+            print("--no-board: skipping board ADC capture verification step")
 
+        # Prepare ADC capture kwargs from args
+        capture_kwargs = dict(
+            ace_host=args.ace_host,
+            sample_count=args.samples,
+            scale=ADC_LSB,
+            odr_code=args.odr_code,
+            filter_code=args.filter_code,
+        )
+
+        # Initialize SMU
+        smu = B2912A(args.resource)
+
+        applied = []
+        adc_meas = []
+
+        for V in args.voltages:
+            print(f"\n==> Applying {V:.6f} V")
+            smu.set_voltage(V,
+                            current_limit=0.01,
+                            range_mode='AUTO')
+            smu.output_on()
+            time.sleep(0.2)  # allow settling
+
+            # ADC capture
+            if not args.no_board:
+                raw = capture_samples(**capture_kwargs)
+                v_adc = np.mean(raw)
+                print(f"ADC reading: {v_adc:.6f} V (mean of {len(raw)} samples)")
+                if args.plot:
+                    filename = f"adc_{V:.6f}.png"
+                    from plotting import plot_histogram
+                    plot_histogram(raw,
+                                   bins=args.hist_bins,
+                                   out_file=filename,
+                                   show=args.show)
+                    print(f"Histogram saved to {filename}")
+            else:
+                v_adc = None
+
+            smu.output_off()
+
+            applied.append(V)
+            adc_meas.append(v_adc)
+
+        smu.close()
+
+        # Print summary
+        print("\n=== Summary ===")
+        print("Applied   ADC (if)")
+        for a, r in zip(applied, adc_meas):
+            print(f"{a:8.6f}   {r or 'N/A':>8}")
+
+        # Compute DC gain and offset
+        results = compute_dc_gain_offset(
+            applied, None, adc_meas
+        )
+        print(f"\nComputed DC Gain: {results['gain']:.6f}  Offset: {results['offset']:.6f}  R²: {results['r2']:.4f}")
+
+        return
+
+    print("Unknown command. Use -h for help.")
 
 if __name__ == '__main__':
     main()

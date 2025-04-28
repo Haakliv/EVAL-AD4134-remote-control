@@ -1,0 +1,4 @@
+numpy>=1.21
+pyvisa>=1.11
+matplotlib>=3.5
+pythonnet>=3.0.5

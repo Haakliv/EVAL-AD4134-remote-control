@@ -2,6 +2,7 @@ import numpy as np
 from ace_client import ACEClient, ADC_RES_BITS, MAX_INPUT_RANGE
 import os
 import time
+import visa
 
 
 def read_raw_samples(bin_file, scale=(MAX_INPUT_RANGE / (2 ** (ADC_RES_BITS - 1)))):
@@ -83,6 +84,21 @@ def capture_samples(
     # Read and scale samples
     return read_raw_samples(bin_path, scale)
 
-
 # Initialize attribute so callers can always access the last .bin path
 capture_samples.last_bin_path = None
+
+
+def measure_dmm(voltage_resource: str) -> float:
+    """
+    Query a DMM (e.g., Keithley 7510) for DC voltage measurement.
+    """
+    rm = visa.ResourceManager()
+    dmm = rm.open_resource(voltage_resource)
+    # Configure DMM for DC volt measurement
+    dmm.write('SENS:VOLT:DC:NPLC 10')
+    dmm.write('SENS:VOLT:DC:RANG:AUTO ON')
+    time.sleep(0.1)
+    val = float(dmm.query('READ?'))
+    dmm.close()
+    rm.close()
+    return val
