@@ -30,9 +30,10 @@ from plotting import (
     plot_freq_response,
 )
 
-# === Constants and Defaults ===
+# -- Constants and defaults ----------------------------------------------------------
 ACE_HOST_DEFAULT     = 'localhost:2357'
 SDG_HOST_DEFAULT     = '172.16.1.56'
+B29_HOST_DEFAULT     = '169.254.5.2'
 ADC_LSB              = MAX_INPUT_RANGE / (2 ** (ADC_RES_BITS - 1))
 
 # Default codes
@@ -44,11 +45,9 @@ HIST_BINS_DEFAULT    = 100
 SETTLING_THRESH_FRAC = 0.01
 SWEEP_POINTS_DEFAULT = 50
 
-# === Agilent Defaults ===
-DEFAULT_SMU_RESOURCE = 'TCPIP0::169.254.5.2::inst0::INSTR'
 
+# Adds ADC-related arguments to the parser
 def add_common_adc_args(parser):
-    """Adds ADC-related arguments to the parser."""
     parser.add_argument(
         '--ace-host', dest='ace_host', type=str,
         default=ACE_HOST_DEFAULT,
@@ -73,8 +72,8 @@ def add_common_adc_args(parser):
     )
 
 
+# Adds shared plotting flags to the parser
 def add_common_plot_args(parser):
-    """Adds shared plotting flags to the parser."""
     parser.add_argument('--plot', action='store_true', help='save plots to files')
     parser.add_argument('--show', action='store_true', help='display plots on screen')
 
@@ -83,7 +82,7 @@ def setup_parsers():
     parser = argparse.ArgumentParser(description='CLI')
     subs = parser.add_subparsers(dest='cmd', required=True)
 
-    # -- noise-floor ----------------------------------------------------------
+    # -- Noise floor ----------------------------------------------------------
     nf = subs.add_parser('noise-floor', help='Noise floor test')
     add_common_adc_args(nf)
     add_common_plot_args(nf)
@@ -92,7 +91,7 @@ def setup_parsers():
                     help='number of bins for histogram')
     nf.add_argument('--fft', action='store_true', help='perform FFT')
 
-    # -- sfdr ---------------------------------------------------------------
+    # -- SFDR, THD, ENOB ---------------------------------------------------------------
     sf = subs.add_parser('sfdr', help='SFDR/SINAD/ENOB test')
     sf.add_argument('--sdg-host', dest='sdg_host', type=str,
                     default=SDG_HOST_DEFAULT,
@@ -116,7 +115,7 @@ def setup_parsers():
     add_common_adc_args(sf)
     add_common_plot_args(sf)
 
-    # -- settling-time -------------------------------------------------------
+    # -- Settling time -------------------------------------------------------
     st = subs.add_parser('settling-time', help='Transient settling time test')
     st.add_argument('--sdg-host', dest='sdg-host', type=str,
                     default=SDG_HOST_DEFAULT,
@@ -141,7 +140,7 @@ def setup_parsers():
     add_common_adc_args(st)
     add_common_plot_args(st)
 
-    # -- freq-response ------------------------------------------------------
+    # -- Frequency response ------------------------------------------------------
     fr = subs.add_parser('freq-response', help='Frequency response and AC gain test')
     fr.add_argument('--sdg-host', dest='sdg-host', type=str,
                     default=SDG_HOST_DEFAULT,
@@ -169,8 +168,7 @@ def setup_parsers():
     add_common_adc_args(fr)
     add_common_plot_args(fr)
 
-    # -- dc-gain ----------------------------------------------------------
-    # DC gain/offset test
+    # -- DC-gain/offset ----------------------------------------------------------
     dcg = subs.add_parser(
         'dc-gain', help='Measure DC gain and offset with ADC'
     )
@@ -179,7 +177,7 @@ def setup_parsers():
         help='List of DC voltages to apply via SMU'
     )
     dcg.add_argument(
-        '--resource', type=str, default=DEFAULT_SMU_RESOURCE,
+        '--resource', type=str, default=f'TCPIP0::{B29_HOST_DEFAULT}::inst0::INSTR',
         help='TCPIP VISA resource of B2912A (e.g. TCPIP0::192.168.1.100::inst0::INSTR)'
     )
     dcg.add_argument(
@@ -209,14 +207,14 @@ def main():
         filter_code = args.filter_code,
     )
 
-    # ------------------- noise-floor -------------------
+    # ------------------- Noise floor -------------------
     if args.cmd == 'noise-floor':
+        print('=== Noise Floor Test ===')
         ace = ACEClient(args.ace_host)
         print(f"ACE @ {args.ace_host}, IP {ace.get_local_ip()}")
         print(f"Using ODR={odr_rate:.0f}Hz (code={args.odr_code}), "
               f"filter={filter_type} (code={args.filter_code})")
 
-        # Configure and capture with the single ACEClient
         ace.configure_board(
             filter_code      = args.filter_code,
             disable_channels = '0,2,3',
@@ -236,11 +234,9 @@ def main():
             scale      = ADC_LSB
         )
 
-        # Compute and print metrics
         mean, std, ptp = compute_noise_floor_metrics(raw)
         print(f"Noise floor: mean={mean:.3e} V, std={std:.3e} V, pp={ptp:.3e} V")
 
-        # Optional plots
         if args.plot or args.show:
             plot_raw(raw,
                      out_file = args.plot and f"raw_{args.samples}.png",
@@ -256,8 +252,10 @@ def main():
                      out_file = args.plot and f"fft_{args.samples}.png",
                      show     = args.show)
 
-    # ------------------- sfdr -------------------
+    # ------------------- SFDR, THD, ENOB -------------------
     elif args.cmd == 'sfdr':
+        print('=== Dynamic Performance Test ===')
+        print('Connecting to function generator...')
         gen = WaveformGenerator(args.sdg_host)
         gen.sine(args.channel, args.freq, args.amplitude, args.offset)
         print(f"SDG Output: {args.freq:.3f} Hz, {args.amplitude:.3f} Vpp, "
@@ -277,8 +275,9 @@ def main():
               f"SINAD={sinad_v:.2f} dB, ENOB={enob_v:.2f} bits")
         gen.disable(args.channel)
 
-    # ------------------- settling-time -------------------
+    # ------------------- Settling time -------------------
     elif args.cmd == 'settling-time':
+        print('=== Settling Time Test ===')
         gen = WaveformGenerator(args.sdg_host)
         gen.pulse(args.channel, args.frequency, args.amplitude, args.offset)
         print(f"SDG Step: {args.frequency:.3f} Hz, {args.amplitude:.3f} Vpp, "
@@ -297,8 +296,9 @@ def main():
                           show     = args.show)
         gen.disable(args.channel)
 
-    # ------------------- freq-response -------------------
+    # ------------------- Frequency response -------------------
     elif args.cmd == 'freq-response':
+        print('=== Frequency Response Test ===')
         freqs = np.linspace(args.freq_start, args.freq_stop, args.points)
         gains = []
         gen = WaveformGenerator(args.sdg_host)
@@ -318,7 +318,7 @@ def main():
                                out_file = args.plot and f"freq_resp_{args.points}.png",
                                show     = args.show)
             
-    # ------------------- dc-gain -------------------
+    # ------------------- DC gain/offset -------------------
     elif args.cmd == 'dc-gain':
         print('=== DC Gain and Offset Test ===')
         print(f"SMU LAN resource: {args.resource}")
@@ -367,7 +367,6 @@ def main():
 
         smu.close()
 
-        # Summary
         print('\n--- Summary ---')
         print('Applied(V)   ADC(V)')
         for a, m in zip(applied, adc_readings):

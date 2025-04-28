@@ -1,43 +1,34 @@
 import numpy as np
 
 
+# Compute the FFT magnitude spectrum of a real-valued signal.
+# param raw: 1D numpy array of time-domain samples
+# param fs: Sampling rate in Hz
+# return: freqs (Hz), spectrum (magnitude)
 def fft_spectrum(raw, fs):
-    """
-    Compute the FFT magnitude spectrum of a real-valued signal.
-
-    :param raw: 1D numpy array of time-domain samples
-    :param fs: Sampling rate in Hz
-    :return: freqs (Hz), spectrum (magnitude)
-    """
     N = raw.size
     freqs = np.fft.rfftfreq(N, d=1.0/fs)
     spectrum = np.abs(np.fft.rfft(raw))
     return freqs, spectrum
 
 
+# Calculate noise floor metrics: mean, standard deviation, and peak-to-peak.
+# param raw: 1D numpy array of voltage samples
+# return: (mean, std, ptp)
 def compute_noise_floor_metrics(raw):
-    """
-    Calculate basic noise-floor statistics: mean, standard deviation, and peak-to-peak.
-
-    :param raw: 1D numpy array of voltage samples
-    :return: (mean, std, ptp)
-    """
     mean = raw.mean()
     std = raw.std()
     ptp = np.ptp(raw)
     return mean, std, ptp
 
 
+# Calculate SFDR, THD, SINAD, and ENOB for a single-tone input.
+# param freqs: frequency bins (Hz)
+# param spectrum: magnitude spectrum
+# param f0: fundamental frequency (Hz)
+# param num_harmonics: number of harmonics to include for THD
+# return: (sfdr_dB, thd_dB, sinad_dB, enob_bits)
 def compute_metrics(freqs, spectrum, f0, num_harmonics=5):
-    """
-    Calculate SFDR, THD, SINAD, and ENOB for a single-tone input.
-
-    :param freqs: frequency bins (Hz)
-    :param spectrum: magnitude spectrum
-    :param f0: fundamental frequency (Hz)
-    :param num_harmonics: number of harmonics to include for THD
-    :return: (sfdr_dB, thd_dB, sinad_dB, enob_bits)
-    """
     # Fundamental power
     idx_f = np.argmin(np.abs(freqs - f0))
     P1 = spectrum[idx_f] ** 2
@@ -67,15 +58,12 @@ def compute_metrics(freqs, spectrum, f0, num_harmonics=5):
     return sfdr, thd, sinad, enob
 
 
+# Estimate the settling time of a step response in the raw data.
+# param raw: time-domain samples
+# param fs: sampling rate (Hz)
+# param threshold: absolute voltage threshold for settling
+# return: settling time in seconds or None
 def compute_settling_time(raw, fs, threshold):
-    """
-    Estimate the settling time of a step response in the raw data.
-
-    :param raw: time-domain samples
-    :param fs: sampling rate (Hz)
-    :param threshold: absolute voltage threshold for settling
-    :return: settling time in seconds or None
-    """
     N = raw.size
     t = np.arange(N) / fs
     final = np.mean(raw[int(0.9 * N):])
@@ -87,15 +75,12 @@ def compute_settling_time(raw, fs, threshold):
     return None
 
 
+# Compute the -db_down dB bandwidth from a gain sweep.
+# param freqs: array of stimulus frequencies (Hz)
+# param gains: corresponding linear gains
+# param db_down: dB drop from reference gain (default 3 dB)
+# return: bandwidth frequency (Hz)
 def compute_bandwidth(freqs, gains, db_down=3):
-    """
-    Compute the -db_down dB bandwidth from a gain sweep.
-
-    :param freqs: array of stimulus frequencies (Hz)
-    :param gains: corresponding linear gains
-    :param db_down: dB drop from reference gain (default 3 dB)
-    :return: bandwidth frequency (Hz)
-    """
     ref_gain = gains[0]
     cutoff_lin = ref_gain / (10 ** (db_down / 20))
     for f, g in zip(freqs, gains):
@@ -104,15 +89,12 @@ def compute_bandwidth(freqs, gains, db_down=3):
     return freqs[-1]
 
 
+# Compute DC gain and offset errors from test data.
+# param applied: sequence of nominal voltages applied by SMU
+# param verified: sequence of actual voltages measured by DMM (or None)
+# param adc: sequence of voltages read by the ADC
+# return: dict with keys 'gain', 'offset', and fit R^2
 def compute_dc_gain_offset(applied, verified, adc):
-    """
-    Compute DC gain and offset errors from test data.
-
-    :param applied: sequence of nominal voltages applied by SMU
-    :param verified: sequence of actual voltages measured by DMM (or None)
-    :param adc: sequence of voltages read by the ADC
-    :return: dict with keys 'gain', 'offset', and fit R^2
-    """
     # Use the verified values if provided, else use applied
     x = np.array(verified) if verified[0] is not None else np.array(applied)
     y = np.array(adc)

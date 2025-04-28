@@ -4,14 +4,13 @@ import os
 import time
 import pyvisa as visa
 
-def read_raw_samples(bin_file, scale=(MAX_INPUT_RANGE / (2 ** (ADC_RES_BITS - 1)))):
-    """
-    Read raw binary captures from the AD4134 and convert to scaled voltages.
+ADC_SCALE = MAX_INPUT_RANGE / (2 ** (ADC_RES_BITS - 1))  # LSB weight for ±4.096 V input range
 
-    :param bin_file: Path to the .bin file containing raw 3-byte samples
-    :param scale: Multiplicative scale factor (e.g. LSB weight)
-    :return: 1D numpy array of float voltages
-    """
+# Read raw binary samples from the AD4134 capture file and convert to scaled voltages.
+# param bin_file: Path to the .bin file containing raw 3-byte samples
+# param scale: Multiplicative scale factor (e.g. LSB weight)
+# return: 1D numpy array of float voltages
+def read_raw_samples(bin_file, scale=ADC_SCALE):
     # Wait for file to exist (with a timeout)
     deadline = time.time() + 5.0
     while time.time() < deadline and not os.path.isfile(bin_file):
@@ -41,6 +40,15 @@ def read_raw_samples(bin_file, scale=(MAX_INPUT_RANGE / (2 ** (ADC_RES_BITS - 1)
     return raw_counts.astype(float) * scale
 
 
+# Configure ADC board and perform capture, and return scaled samples.
+# param ace_host: Address of ACE remote control server
+# param sample_count: Number of samples to capture
+# param scale: LSB-to-voltage scale factor
+# param odr_code: Output data rate code (0–13)
+# param filter_code: ADC filter code (0–4)
+# param disable_channels: CSV list of channels to power-down
+# param timeout_ms: Capture timeout in milliseconds
+# return: numpy array of voltage samples
 def capture_samples(
     ace_host: str = 'localhost:2357',
     sample_count: int = 131072,
@@ -50,19 +58,6 @@ def capture_samples(
     disable_channels: str = '0,2,3',
     timeout_ms: int = 10000
 ) -> np.ndarray:
-    """
-    Configure ADC board, perform capture, and return scaled samples.
-
-    :param ace_host: Address of ACE remote control server
-    :param sample_count: Number of samples to capture
-    :param scale: LSB-to-voltage scale factor
-    :param odr_code: Output data rate code (0–13)
-    :param filter_code: ADC filter code (0–4)
-    :param disable_channels: CSV list of channels to power-down
-    :param timeout_ms: Capture timeout in milliseconds
-    :return: numpy array of voltage samples
-    """
-    # Initialize and configure the board
     ace = ACEClient(ace_host)
     ace.configure_board(
         filter_code=filter_code,
@@ -73,31 +68,13 @@ def capture_samples(
     # Capture raw binary
     bin_path = ace.capture(sample_count, odr_code, timeout_ms)
 
-    # Remember where we just wrote the .bin
     capture_samples.last_bin_path = bin_path
 
     # Change dir for plots
     folder = os.path.dirname(bin_path)
     os.chdir(folder)
 
-    # Read and scale samples
     return read_raw_samples(bin_path, scale)
 
 # Initialize attribute so callers can always access the last .bin path
 capture_samples.last_bin_path = None
-
-
-def measure_dmm(voltage_resource: str) -> float:
-    """
-    Query a DMM (e.g., Keithley 7510) for DC voltage measurement.
-    """
-    rm = visa.ResourceManager()
-    dmm = rm.open_resource(voltage_resource)
-    # Configure DMM for DC volt measurement
-    dmm.write('SENS:VOLT:DC:NPLC 10')
-    dmm.write('SENS:VOLT:DC:RANG:AUTO ON')
-    time.sleep(0.1)
-    val = float(dmm.query('READ?'))
-    dmm.close()
-    rm.close()
-    return val

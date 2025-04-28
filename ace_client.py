@@ -37,7 +37,7 @@ SINC_FILTER_MAP = {
 }
 
 
-# ---- UI & context paths for AD4134 ----
+# UI & context paths for AD4134
 UI_ROOT     = r"Root::System"
 UI_BOARD    = UI_ROOT + r".Subsystem_1.AD4134 Eval Board"
 UI_DRIVER   = UI_BOARD + r".AD4134"
@@ -52,11 +52,9 @@ ADC_RES_BITS    = 24     # 24-bit ADC resolution
 MAX_INPUT_RANGE = 4.096  # ±4.096 V input range of AD4134
 
 
+# Ensure that requested peak-to-peak voltage and offset do not exceed input range.
+# Returns a safe Vpp value (<= 2*(max_input - abs(offset))).
 def limit_vpp_offset(requested_vpp, offset, max_input=MAX_INPUT_RANGE):
-    """
-    Ensure that requested peak-to-peak voltage and offset do not exceed input range.
-    Returns a safe Vpp value (<= 2*(max_input - abs(offset))).
-    """
     allowed_vpp = 2 * (max_input - abs(offset))
     if requested_vpp > allowed_vpp:
         print(
@@ -67,8 +65,8 @@ def limit_vpp_offset(requested_vpp, offset, max_input=MAX_INPUT_RANGE):
     return requested_vpp
 
 
+# Create a timestamped Measurements folder for saving capture files.
 def _measurement_folder():
-    """Create a timestamped Measurements folder and return its path."""
     base = os.path.dirname(os.path.abspath(__file__))
     meas_root = os.path.join(base, 'Measurements')
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -77,8 +75,8 @@ def _measurement_folder():
     return folder
 
 
+# Wrapper for ACE Remote Control for AD4134 using the Control API.
 class ACEClient:
-    """Wrapper around ACE Remote Control for AD4134 using the Control API."""
     def __init__(self, host='localhost:2357'):
         mgr = adrc.ClientManager.Create()
         self.client = mgr.CreateRequestClient(host)
@@ -97,21 +95,15 @@ class ACEClient:
         self.client.Run('@GetStatusFromBoard()')
         time.sleep(1)
 
+    # Return the ACE server's IP address.
     def get_local_ip(self):
-        """Return the local IP address of this machine."""
         return socket.gethostbyname(socket.gethostname())
 
-    def configure_board(self, filter_code: int = 2, disable_channels='0,2,3', odr_code: int = 12):
-        """
-        Configure filter, data format, and power-down channels.
-        The 'odr' argument is accepted for signature compatibility, but actual ODR
-        is set in the capture() method.
-        :param filter_type: one of 'Sinc3','Sinc3 50Hz & 60Hz Rejection','Sinc6',
-                            'Wideband01','Wideband04'
-        :param disable_channels: CSV of channel indices to power down
-        :param odr: ignored here (handled in capture)
-        """
-                # filter_code is passed directly
+    # Configure the ADC board with filter, data format, and power-down channels.
+    # param filter_code: ADC filter code (0-4)
+    # param disable_channels: CSV of channel indices to power down
+    def configure_board(self, filter_code: int = 2, disable_channels='0,2,3'):
+        # filter_code is passed directly
         code = str(filter_code)
 
         self.client.set_ContextPath(CTX_DRIVER)
@@ -130,15 +122,13 @@ class ACEClient:
         self.client.Run('@ApplySettings()')
         time.sleep(1)
 
+    # Perform an asynchronous raw data capture to a binary file.
+    # param sample_count: number of samples to capture
+    # param odr_code: desired output data rate in Hz
+    # param timeout_ms: timeout in milliseconds
+    # return: path to the binary output file
     def capture(self, sample_count, odr_code: int, timeout_ms=10000):
-        """
-        Perform an asynchronous raw data capture to a binary file.
-        :param sample_count: number of samples to capture
-        :param odr: desired output data rate in Hz
-        :param timeout_ms: timeout in milliseconds
-        :return: path to the binary output file
-        """
-        # Back to driver page for capture
+        # Return to driver page for capture
         self.client.set_ContextPath(CTX_DRIVER)
         self.client.NavigateToPath(UI_DRIVER)
 
