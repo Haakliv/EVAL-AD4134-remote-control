@@ -2,8 +2,7 @@ import numpy as np
 from ace_client import ACEClient, ADC_RES_BITS, MAX_INPUT_RANGE
 import os
 import time
-import visa
-
+import pyvisa as visa
 
 def read_raw_samples(bin_file, scale=(MAX_INPUT_RANGE / (2 ** (ADC_RES_BITS - 1)))):
     """

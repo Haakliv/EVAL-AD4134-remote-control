@@ -45,8 +45,7 @@ SETTLING_THRESH_FRAC = 0.01
 SWEEP_POINTS_DEFAULT = 50
 
 # === Agilent Defaults ===
-AGILENT_DEFAULT_RSRC = 'USB0::0x0957::0x8E18::MY123456::INSTR'
-
+DEFAULT_SMU_RESOURCE = 'TCPIP0::169.254.5.2::inst0::INSTR'
 
 def add_common_adc_args(parser):
     """Adds ADC-related arguments to the parser."""
@@ -171,15 +170,22 @@ def setup_parsers():
     add_common_plot_args(fr)
 
     # -- dc-gain ----------------------------------------------------------
-    dcg = subs.add_parser('dc-gain', help='DC gain and offset test')
-    dcg.add_argument('voltages', nargs='+', type=float,
-                     help='DC voltages to apply (in volts)')
-    dcg.add_argument('--resource', type=str,
-                     default=AGILENT_DEFAULT_RSRC,
-                     help='VISA resource string for B2912A')
-    dcg.add_argument('-no-board', dest='no_board', action='store_true',
-                     help='Skip board ADC capture verification step')
-
+    # DC gain/offset test
+    dcg = subs.add_parser(
+        'dc-gain', help='Measure DC gain and offset with ADC'
+    )
+    dcg.add_argument(
+        'voltages', nargs='+', type=float,
+        help='List of DC voltages to apply via SMU'
+    )
+    dcg.add_argument(
+        '--resource', type=str, default=DEFAULT_SMU_RESOURCE,
+        help='TCPIP VISA resource of B2912A (e.g. TCPIP0::192.168.1.100::inst0::INSTR)'
+    )
+    dcg.add_argument(
+        '-no-board', dest='no_board', action='store_true',
+        help='Skip ADC capture; only apply voltages'
+    )
     # ADC capture arguments
     add_common_adc_args(dcg)
     add_common_plot_args(dcg)
@@ -313,14 +319,14 @@ def main():
                                show     = args.show)
             
     # ------------------- dc-gain -------------------
-    if args.cmd == 'dc-gain':
-        print("Starting DC gain and offset test...")
-        print(f"Applying voltages: {args.voltages}")
-        print(f"Using SMU resource: {args.resource}")
+    elif args.cmd == 'dc-gain':
+        print('=== DC Gain and Offset Test ===')
+        print(f"SMU LAN resource: {args.resource}")
+        print(f"Voltages: {args.voltages}")
         if args.no_board:
-            print("--no-board: skipping board ADC capture verification step")
+            print('--no-board: skipping ADC capture')
 
-        # Prepare ADC capture kwargs from args
+        # Build capture params
         capture_kwargs = dict(
             ace_host=args.ace_host,
             sample_count=args.samples,
@@ -329,55 +335,51 @@ def main():
             filter_code=args.filter_code,
         )
 
-        # Initialize SMU
+        # Initialize SMU over LAN
         smu = B2912A(args.resource)
-
         applied = []
-        adc_meas = []
+        adc_readings = []
 
         for V in args.voltages:
-            print(f"\n==> Applying {V:.6f} V")
-            smu.set_voltage(V,
-                            current_limit=0.01,
-                            range_mode='AUTO')
+            print(f"\nApplying {V:.6f} V...")
+            smu.set_voltage(V, current_limit=0.01, range_mode='AUTO')
             smu.output_on()
-            time.sleep(0.2)  # allow settling
+            time.sleep(0.2)
 
-            # ADC capture
             if not args.no_board:
                 raw = capture_samples(**capture_kwargs)
-                v_adc = np.mean(raw)
-                print(f"ADC reading: {v_adc:.6f} V (mean of {len(raw)} samples)")
+                v_meas = np.mean(raw)
+                print(f"ADC mean: {v_meas:.6f} V")
                 if args.plot:
-                    filename = f"adc_{V:.6f}.png"
                     from plotting import plot_histogram
+                    fname = f"hist_{V:.6f}.png"
                     plot_histogram(raw,
                                    bins=args.hist_bins,
-                                   out_file=filename,
+                                   out_file=fname,
                                    show=args.show)
-                    print(f"Histogram saved to {filename}")
+                    print(f"Histogram saved to {fname}")
             else:
-                v_adc = None
+                v_meas = None
 
             smu.output_off()
-
             applied.append(V)
-            adc_meas.append(v_adc)
+            adc_readings.append(v_meas)
 
         smu.close()
 
-        # Print summary
-        print("\n=== Summary ===")
-        print("Applied   ADC (if)")
-        for a, r in zip(applied, adc_meas):
-            print(f"{a:8.6f}   {r or 'N/A':>8}")
+        # Summary
+        print('\n--- Summary ---')
+        print('Applied(V)   ADC(V)')
+        for a, m in zip(applied, adc_readings):
+            print(f"{a:10.6f}   {m or 'N/A':>8}")
 
-        # Compute DC gain and offset
-        results = compute_dc_gain_offset(
-            applied, None, adc_meas
-        )
-        print(f"\nComputed DC Gain: {results['gain']:.6f}  Offset: {results['offset']:.6f}  R²: {results['r2']:.4f}")
+        if args.no_board:
+             print("\n--no-board: skipping gain/offset calculation")
+             return
 
+        # Compute gain/offset
+        results = compute_dc_gain_offset(applied, None, adc_readings)
+        print(f"\nGain: {results['gain']:.6f}, Offset: {results['offset']:.6f}, R2: {results['r2']:.4f}")
         return
 
     print("Unknown command. Use -h for help.")
