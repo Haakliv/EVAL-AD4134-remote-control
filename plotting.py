@@ -88,3 +88,15 @@ def plot_freq_response(freqs, gains, out_file=None, show=False):
     plt.tight_layout()
     if out_file:  plt.savefig(out_file)
     if show:      plt.show()
+
+def plot_dc_gain(actual_vs, adc_means, out_file=None, show=False):
+    plt.figure()
+    plt.plot(actual_vs, adc_means, 'o-')
+    plt.xlabel('Actual Voltage (V)')
+    plt.ylabel('ADC Measured Voltage (V)')
+    plt.title('DC Gain and Offset')
+    plt.tight_layout()
+    if out_file:
+        plt.savefig(out_file)
+    if show:
+        plt.show()

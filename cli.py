@@ -28,6 +28,7 @@ from plotting import (
     plot_fft,
     plot_settling,
     plot_freq_response,
+    plot_dc_gain,
 )
 
 # -- Constants and defaults ----------------------------------------------------------
@@ -319,46 +320,63 @@ def main():
                                show     = args.show)
             
     # ------------------- DC gain/offset -------------------
-    elif args.cmd == 'dc-gain':
-        print('=== DC Gain and Offset Test (using SMU sweep) ===')
-        print(f"SMU LAN resource: {args.resource}")
-        vs = args.voltages
-        start, stop = vs[0], vs[-1]
-        points = len(vs)
-        print(f"Sweeping from {start:.6f} V to {stop:.6f} V in {points} steps")
+    if args.cmd == 'dc-gain':
+        print('=== DC Gain and Offset Test (EVAL-AD4134) ===')
+        print(f"SMU resource: {args.resource}")
+        print(f"DMM resource: {args.dmm_resource}")
 
-        trigger_delay = 0.2
+        voltages = args.voltages
+        num_pts = len(voltages)
+        print(f"Applying {num_pts} DC points from {voltages[0]:.6f} V to {voltages[-1]:.6f} V")
 
         smu = B2912A(args.resource)
-        smu.sweep_voltage(
-            start=start,
-            stop=stop,
-            points=points,
-            current_limit=0.01,
-            range_mode='AUTO',
-            trigger_count=1,
-            trigger_delay=trigger_delay,
-            trigger_period=None      # Immediate next point after delay
-        )
-        # Wait for completion
-        smu.smu.query('*OPC?')
-        # Pull back the measured values
-        readings = smu.smu.query_ascii_values('TRACE:DATA?')
+
+        adc_means = []
+        actual_vs = []
+        trigger_delay = 0.2
+
+        for v in voltages:
+            smu.sweep_voltage(
+                start=v,
+                stop=v,
+                points=1,
+                current_limit=0.01,
+                range_mode='AUTO',
+                trigger_count=1,
+                trigger_delay=trigger_delay,
+                trigger_period=None
+            )
+            smu.smu.query('*OPC?')
+
+            actual = measure_dmm(args.dmm_resource)
+            actual_vs.append(actual)
+            print(f"Applied (actual): {actual:.6f} V")
+
+            if not args.no_board:
+                raw = capture_samples(
+                    ace_host=args.ace_host,
+                    sample_count=args.samples,
+                    scale=ADC_LSB,
+                    odr_code=args.odr_code,
+                    filter_code=args.filter_code,
+                )
+                mean_v = np.mean(raw)
+                adc_means.append(mean_v)
+                print(f"ADC Mean: {mean_v:.6f} V")
+
         smu.close()
 
-        # Print summary
-        print('\n--- Summary ---')
-        print('Applied(V)   Measured(V)')
-        for a, m in zip(vs, readings):
-            print(f"{a:10.6f}   {m:10.6f}")
+        if args.no_board:
+            return
 
-        # Compute gain & offset
-        results = compute_dc_gain_offset(vs, None, readings)
-        print(f"\nGain: {results['gain']:.6f}, "
-              f"Offset: {results['offset']:.6f}, "
-              f"R2: {results['r2']:.4f}")
+        results = compute_dc_gain_offset(actual_vs, None, adc_means)
+        print(f"\nGain: {results['gain']:.6f}, Offset: {results['offset']:.6f}, R²: {results['r2']:.4f}")
+
+        if args.plot or args.show:
+            out_file = args.plot and f"dc_gain_{num_pts}.png"
+            plot_dc_gain(actual_vs, adc_means, out_file=out_file, show=args.show)
+
         return
-
 
     print("Unknown command. Use -h for help.")
 
