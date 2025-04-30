@@ -56,45 +56,45 @@ class B2912A:
                       trigger_count: int = 1,
                       trigger_delay: float = 0.0,
                       trigger_period: float = None):
-        # Configure source for sweep
+        requested_vpp = abs(stop - start)
+        offset = (start + stop) / 2.0
+
+        safe_vpp = limit_vpp_offset(requested_vpp,
+                                     offset,
+                                     max_input=MAX_INPUT_RANGE)
+
+        safe_start = offset - safe_vpp / 2.0
+        safe_stop  = offset + safe_vpp / 2.0
+
         self.smu.write('SOUR:FUNC VOLT')
         self.smu.write(f'SENS:CURR:PROT {current_limit}')
-        # Set sweep mode
-        self.smu.write('SOUR:VOLT:MODE SWE')
-        # Range operation for sweep
         self.smu.write(f'SOUR:VOLT:SWE:MODE {range_mode}')
-        # Start/stop
-        self.smu.write(f'SOUR:VOLT:SWE:STAR {start}')
-        self.smu.write(f'SOUR:VOLT:SWE:STOP {stop}')
-        # Points or step
+        self.smu.write(f'SOUR:VOLT:SWE:STAR {safe_start}')
+        self.smu.write(f'SOUR:VOLT:SWE:STOP {safe_stop}')
+
         if points is not None:
             self.smu.write(f'SOUR:VOLT:SWE:POIN {points}')
         elif step is not None:
             self.smu.write(f'SOUR:VOLT:SWE:STEP {step}')
         else:
             raise ValueError('Either points or step must be specified')
-        # Trigger settings
+
         self.smu.write(f'TRIG:COUN {trigger_count}')
         self.smu.write(f'TRIG:DEL {trigger_delay}')
         if trigger_period is not None:
-            # Use TIMER trigger for fixed interval
             self.smu.write('TRIG:TYPE TIM')
             self.smu.write(f'TRIG:TIM {trigger_period}')
         else:
-            # Default to immediate trigger
             self.smu.write('TRIG:TYPE IMM')
-        # Start the sweep
+
         self.smu.write('INIT')
 
-    # Enable the SMU output
     def output_on(self):
         self.smu.write('OUTP ON')
 
-    # Disable the SMU output
     def output_off(self):
         self.smu.write('OUTP OFF')
 
-    # Turn off the output and close the VISA session
     def close(self):
         try:
             self.output_off()
