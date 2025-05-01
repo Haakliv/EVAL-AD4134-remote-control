@@ -78,8 +78,10 @@ def _measurement_folder():
 # Wrapper for ACE Remote Control for AD4134 using the Control API.
 class ACEClient:
     def __init__(self, host='localhost:2357'):
+        print(f"Connecting to ACE server at {host}...")
         mgr = adrc.ClientManager.Create()
         self.client = mgr.CreateRequestClient(host)
+        print(f"Connected to ACE server at {host}, initializing board...")
         # Initialize board
         self.client.NavigateToPath(UI_ROOT)
         self.client.AddHardwarePlugin(ACE_PLUGIN)
@@ -103,6 +105,7 @@ class ACEClient:
     # param filter_code: ADC filter code (0-4)
     # param disable_channels: CSV of channel indices to power down
     def configure_board(self, filter_code: int = 2, disable_channels='0,2,3'):
+        print(f"Configuring board with filter {SINC_FILTER_MAP[filter_code]}")
         # filter_code is passed directly
         code = str(filter_code)
 
@@ -130,6 +133,7 @@ class ACEClient:
     # param timeout_ms: timeout in milliseconds
     # return: path to the binary output file
     def capture(self, sample_count, odr_code: int, timeout_ms=10000):
+        print(f"Capturing {sample_count} samples at ODR {SLAVE_ODR_MAP[odr_code]}")
         # Return to driver page for capture
         self.client.set_ContextPath(CTX_DRIVER)
         self.client.NavigateToPath(UI_DRIVER)

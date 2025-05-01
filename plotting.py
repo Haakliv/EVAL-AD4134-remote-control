@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
-
+from matplotlib.ticker import MaxNLocator
 
 # Plot time-domain raw data
 # param fs: sampling frequency (Hz)
@@ -70,8 +70,10 @@ def plot_settling(raw, fs, out_file=None, show=False):
     plt.ylabel('Voltage [V]')
     plt.title('Settling Transient')
     plt.tight_layout()
-    if out_file:  plt.savefig(out_file)
-    if show:      plt.show()
+    if out_file:
+        plt.savefig(out_file)
+    if show:
+        plt.show()
 
 
 # Plot frequency response
@@ -86,8 +88,11 @@ def plot_freq_response(freqs, gains, out_file=None, show=False):
     plt.ylabel('Gain [dB]')
     plt.title('Frequency Response')
     plt.tight_layout()
-    if out_file:  plt.savefig(out_file)
-    if show:      plt.show()
+    if out_file:
+        plt.savefig(out_file)
+    if show:
+        plt.show()
+
 
 def plot_dc_gain(actual_vs, adc_means, out_file=None, show=False):
     plt.figure()
@@ -95,6 +100,53 @@ def plot_dc_gain(actual_vs, adc_means, out_file=None, show=False):
     plt.xlabel('Actual Voltage (V)')
     plt.ylabel('ADC Measured Voltage (V)')
     plt.title('DC Gain and Offset')
+    plt.tight_layout()
+    if out_file:
+        plt.savefig(out_file)
+    if show:
+        plt.show()
+
+# New aggregated plotting functions
+# Plot aggregated histogram with runs, ODR, and filter info
+# param raw_all: concatenated array from all runs
+# param bins: number of histogram bins
+# param runs: number of runs performed
+# param odr: ODR rate in Hz
+# param filt: filter name (string)
+# param out_file: filename to save the figure (PNG)
+# param show: if True, display the plot interactively
+def plot_agg_histogram(raw_all, bins, runs, odr, filt, out_file=None, show=False):
+    fig, ax = plt.subplots()
+    ax.hist(raw_all, bins=bins)
+    ax.set_xlabel('Voltage [V]')
+    ax.set_ylabel('Count')
+    ax.set_title(f"{runs}-run Noise Floor Histogram @ {odr:.0f}Hz ({filt})")
+
+    # fewer, rotated x-ticks so they don’t overlap
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=6, prune='both'))
+    plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
+
+    plt.tight_layout()
+    if out_file:
+        plt.savefig(out_file)
+    if show:
+        plt.show()
+
+
+# Plot aggregated FFT/PSD with runs, ODR, and filter info
+# param freqs: frequency bins (Hz)
+# param mags: magnitude spectrum
+# param runs: number of runs performed
+# param odr: ODR rate in Hz
+# param filt: filter name (string)
+# param out_file: filename to save the figure (PNG)
+# param show: if True, display the plot interactively
+def plot_agg_fft(freqs, mags, runs, odr, filt, out_file=None, show=False):
+    plt.figure()
+    plt.plot(freqs, mags)
+    plt.xlabel('Frequency [Hz]')
+    plt.ylabel('Magnitude')
+    plt.title(f"{runs}-run Noise Floor PSD @ {odr:.0f}Hz ({filt})")
     plt.tight_layout()
     if out_file:
         plt.savefig(out_file)

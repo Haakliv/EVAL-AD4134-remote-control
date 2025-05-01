@@ -2,7 +2,9 @@
 import argparse
 import numpy as np
 import os
-import time
+import datetime
+
+from scipy.signal import welch
 
 from ace_client import (
     ACEClient,
@@ -13,9 +15,8 @@ from ace_client import (
 )
 from generator import WaveformGenerator
 from b2912a_source import B2912A
-from acquisition import capture_samples, read_raw_samples, measure_dmm
+from acquisition import capture_samples
 from processing import (
-    compute_noise_floor_metrics,
     fft_spectrum,
     compute_metrics,
     compute_settling_time,
@@ -23,9 +24,8 @@ from processing import (
     compute_dc_gain_offset,
 )
 from plotting import (
-    plot_raw,
-    plot_histogram,
-    plot_fft,
+    plot_agg_fft,
+    plot_agg_histogram,
     plot_settling,
     plot_freq_response,
     plot_dc_gain,
@@ -70,6 +70,10 @@ def add_common_adc_args(parser):
         '-n', '--samples', type=int,
         default=SAMPLES_DEFAULT,
         help='number of samples to capture'
+    )
+    parser.add_argument(
+        '--runs', type=int, default=5,
+        help='number of repeat measurements to perform'
     )
 
 
@@ -195,71 +199,94 @@ def setup_parsers():
 def main():
     args = setup_parsers().parse_args()
 
+    # Create a per-test output directory and switch into it
+    measurements_root = 'Measurements'
+    os.makedirs(measurements_root, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+    run_dir = os.path.join(measurements_root, f"{args.cmd}_{timestamp}")
+    os.makedirs(run_dir, exist_ok=True)
+    # switch into run directory so all files land here
+    os.chdir(run_dir)
+
     # translate codes into actual values
     odr_rate = SLAVE_ODR_MAP[args.odr_code]
     filter_type = SINC_FILTER_MAP[args.filter_code]
 
+    ace = ACEClient(args.ace_host)
+    ace.configure_board(
+        filter_code=args.filter_code,
+        disable_channels='0,2,3'
+    )
+
     # Prepare kwargs for the other commands
     common_capture_kwargs = dict(
-        ace_host    = args.ace_host,
+        ace_client  = ace,
         sample_count= args.samples,
         scale       = ADC_LSB,
         odr_code    = args.odr_code,
-        filter_code = args.filter_code,
     )
 
     # ------------------- Noise floor -------------------
     if args.cmd == 'noise-floor':
-        print('=== Noise Floor Test (multi-run) ===')
+        odr_rate = SLAVE_ODR_MAP[args.odr_code]
+        filter_name = SINC_FILTER_MAP[args.filter_code]
+
+        print(f"=== Noise Floor Test ({args.runs} runs) @ {odr_rate:.0f}Hz ({filter_name}) ===")
         stds = []
-        hist_data = []
-        welch_psd_sum = None
-        for run in range(1, args.runs+1):
-            ace = ACEClient(args.ace_host)
-            ace.configure_board(
-                filter_code      = args.filter_code,
-                disable_channels = '0,2,3',
-                odr_code         = args.odr_code
+        raw_runs = []
+        welch_sum = None
+
+        for i in range(1, args.runs + 1):
+            # Capture samples using the pre-configured ACE client
+            raw = capture_samples(
+                ace,
+                args.samples,
+                ADC_LSB,
+                args.odr_code,
+                output_dir=os.getcwd()
             )
-            bin_path = ace.capture(
-                sample_count = args.samples,
-                odr_code     = args.odr_code
-            )
-            raw = read_raw_samples(bin_file=bin_path, scale=ADC_LSB)
-            mean, std, ptp = compute_noise_floor_metrics(raw)
+            raw_runs.append(raw)
+
+            mean = np.mean(raw)
+            std = np.std(raw, ddof=0)
+            ptp = np.ptp(raw)
             stds.append(std)
-            hist_data.append(raw)
 
-            # accumulate Welch PSDs
-            f, Pxx = welch(raw, fs=odr_rate, nperseg=args.samples//4, noverlap=args.samples//8)
-            if welch_psd_sum is None:
-                welch_psd_sum = Pxx
-            else:
-                welch_psd_sum += Pxx
+            freqs, Pxx = welch(raw, fs=odr_rate,
+                            nperseg=len(raw)//4,
+                            noverlap=len(raw)//8)
+            welch_sum = Pxx if welch_sum is None else welch_sum + Pxx
 
-            print(f"Run {run:2d}: mean={mean:.3e} V, std={std:.3e} V, ptp={ptp:.3e} V")
+            nsd = np.sqrt(Pxx)
+            med_nsd = np.median(nsd[1:-1])
+            print(f"Run {i:2d}: mean={mean:.3e} V, std={std:.3e} V, "
+                f"ptp={ptp:.3e} V, NSD_med={med_nsd:.3e} V/√Hz")
 
-        # Final statistics
         mean_std = np.mean(stds)
-        std_std  = np.std(stds, ddof=1)
-        print(f"\nAggregated RMS noise: {mean_std:.3e} V ± {std_std:.3e} V (run-to-run)")
+        spread = np.std(stds, ddof=1)
+        print(f"\nRMS noise: {mean_std:.3e} V ± {spread:.3e} V")
 
-        # Aggregated plots
+        Pxx_avg = welch_sum / args.runs
+        nsd_avg = np.sqrt(Pxx_avg)
+        med_nsd_avg = np.median(nsd_avg[1:-1])
+        print(f"Median NSD: {med_nsd_avg:.3e} V/√Hz")
+
+        # Plotting within the same run_dir
         if args.plot or args.show:
-            # Combined histogram
-            all_raw = np.concatenate(hist_data)
             if args.histogram:
-                plot_histogram(all_raw, bins=args.hist_bins,
-                               out_file=args.plot and 'agg_hist.png',
-                               show=args.show)
-            # Welch-averaged spectrum
+                plot_agg_histogram(
+                    np.concatenate(raw_runs), args.hist_bins,
+                    args.runs, odr_rate, filter_name,
+                    out_file='agg_hist.png', show=args.show
+                )
             if args.fft:
-                Pxx_avg = welch_psd_sum / args.runs
-                # convert PSD to magnitude spectrum
-                mag = np.sqrt(Pxx_avg * odr_rate/2)
-                plot_fft(f, mag,
-                         out_file=args.plot and 'agg_fft.png',
-                         show=args.show)
+                mag = np.sqrt(Pxx_avg * odr_rate / 2)
+                plot_agg_fft(
+                    freqs, mag, args.runs,
+                    odr_rate, filter_name,
+                    out_file='agg_fft.png', show=args.show
+                )
+        return
 
     # ------------------- SFDR, THD, ENOB -------------------
     elif args.cmd == 'sfdr':
@@ -355,10 +382,6 @@ def main():
                 trigger_period=None
             )
             smu.smu.query('*OPC?')
-
-            actual = measure_dmm(args.dmm_resource)
-            actual_vs.append(actual)
-            print(f"Applied (actual): {actual:.6f} V")
 
             if not args.no_board:
                 raw = capture_samples(

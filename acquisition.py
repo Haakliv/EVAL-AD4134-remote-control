@@ -1,8 +1,8 @@
 import numpy as np
-from ace_client import ACEClient, ADC_RES_BITS, MAX_INPUT_RANGE
+from ace_client import ADC_RES_BITS, MAX_INPUT_RANGE
 import os
 import time
-import pyvisa as visa
+import shutil
 
 ADC_SCALE = MAX_INPUT_RANGE / (2 ** (ADC_RES_BITS - 1))  # LSB weight for ±4.096 V input range
 
@@ -50,29 +50,36 @@ def read_raw_samples(bin_file, scale=ADC_SCALE):
 # param timeout_ms: Capture timeout in milliseconds
 # return: numpy array of voltage samples
 def capture_samples(
-    ace_host: str = 'localhost:2357',
+    ace_client,
     sample_count: int = 131072,
-    scale: float = 1.0,
+    scale: float = ADC_SCALE,
     odr_code: int = 12,
-    filter_code: int = 2,
-    disable_channels: str = '0,2,3',
-    timeout_ms: int = 10000
+    timeout_ms: int = 10000,
+    output_dir: str = None,
 ) -> np.ndarray:
-    ace = ACEClient(ace_host)
-    ace.configure_board(
-        filter_code=filter_code,
-        disable_channels=disable_channels,
-        odr_code=odr_code
-    )
-
-    # Capture raw binary
+    ace = ace_client
+    # Perform capture; this creates a timestamped folder and files (.bin, .cso, etc.)
     bin_path = ace.capture(sample_count, odr_code, timeout_ms)
-
     capture_samples.last_bin_path = bin_path
 
-    # Change dir for plots
-    folder = os.path.dirname(bin_path)
-    os.chdir(folder)
+    # Move all capture files into output_dir with unique prefixes
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        folder = os.path.dirname(bin_path)
+        prefix = os.path.basename(folder)
+        for fname in os.listdir(folder):
+            src = os.path.join(folder, fname)
+            dst_name = f"{prefix}_{fname}"
+            dst = os.path.join(output_dir, dst_name)
+            shutil.move(src, dst)
+        # clean up the now-empty folder
+        try:
+            os.rmdir(folder)
+        except OSError:
+            pass
+        # update bin_path to the moved file
+        moved_name = f"{prefix}_{os.path.basename(bin_path)}"
+        bin_path = os.path.join(output_dir, moved_name)
 
     return read_raw_samples(bin_path, scale)
 
