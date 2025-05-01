@@ -3,6 +3,7 @@ import argparse
 import numpy as np
 import os
 import datetime
+import logging
 
 from scipy.signal import welch
 
@@ -208,6 +209,19 @@ def main():
     # switch into run directory so all files land here
     os.chdir(run_dir)
 
+    # --- Logging setup ----------------------------------------------------
+    log_file = f"{args.cmd}_results.log"
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s %(levelname)s: %(message)s',
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler()
+        ]
+    )
+    logger = logging.getLogger()
+
+    logger.info(f"Starting '{args.cmd}' test @ {datetime.datetime.now().isoformat()}")
     # translate codes into actual values
     odr_rate = SLAVE_ODR_MAP[args.odr_code]
     filter_type = SINC_FILTER_MAP[args.filter_code]
@@ -230,14 +244,13 @@ def main():
     if args.cmd == 'noise-floor':
         odr_rate = SLAVE_ODR_MAP[args.odr_code]
         filter_name = SINC_FILTER_MAP[args.filter_code]
-
-        print(f"=== Noise Floor Test ({args.runs} runs) @ {odr_rate:.0f}Hz ({filter_name}) ===")
+        
+        logger.info(f"Noise Floor Test on EVAL-AD4134: runs={args.runs}, ODR={odr_rate:.0f}Hz, filter={filter_type}")
         stds = []
         raw_runs = []
         welch_sum = None
 
         for i in range(1, args.runs + 1):
-            # Capture samples using the pre-configured ACE client
             raw = capture_samples(
                 ace,
                 args.samples,
@@ -246,32 +259,29 @@ def main():
                 output_dir=os.getcwd()
             )
             raw_runs.append(raw)
-
             mean = np.mean(raw)
             std = np.std(raw, ddof=0)
             ptp = np.ptp(raw)
             stds.append(std)
 
             freqs, Pxx = welch(raw, fs=odr_rate,
-                            nperseg=len(raw)//4,
-                            noverlap=len(raw)//8)
+                                nperseg=len(raw)//4,
+                                noverlap=len(raw)//8)
             welch_sum = Pxx if welch_sum is None else welch_sum + Pxx
 
             nsd = np.sqrt(Pxx)
             med_nsd = np.median(nsd[1:-1])
-            print(f"Run {i:2d}: mean={mean:.3e} V, std={std:.3e} V, "
-                f"ptp={ptp:.3e} V, NSD_med={med_nsd:.3e} V/√Hz")
+            logger.info(f"Run {i}: mean={mean:.3e} V, std={std:.3e} V, ptp={ptp:.3e} V, NSD_med={med_nsd:.3e} V/sqrt(Hz)")
 
         mean_std = np.mean(stds)
         spread = np.std(stds, ddof=1)
-        print(f"\nRMS noise: {mean_std:.3e} V ± {spread:.3e} V")
+        logger.info(f"RMS noise: {mean_std:.3e} V ± {spread:.3e} V")
 
         Pxx_avg = welch_sum / args.runs
         nsd_avg = np.sqrt(Pxx_avg)
         med_nsd_avg = np.median(nsd_avg[1:-1])
-        print(f"Median NSD: {med_nsd_avg:.3e} V/√Hz")
+        logger.info(f"Median NSD: {med_nsd_avg:.3e} V/sqrt(Hz)")
 
-        # Plotting within the same run_dir
         if args.plot or args.show:
             if args.histogram:
                 plot_agg_histogram(

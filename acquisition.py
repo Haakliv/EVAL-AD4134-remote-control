@@ -58,29 +58,26 @@ def capture_samples(
     output_dir: str = None,
 ) -> np.ndarray:
     ace = ace_client
-    # Perform capture; this creates a timestamped folder and files (.bin, .cso, etc.)
+    # Perform capture; ACEClient.capture creates a timestamped folder
     bin_path = ace.capture(sample_count, odr_code, timeout_ms)
     capture_samples.last_bin_path = bin_path
 
-    # Move all capture files into output_dir with unique prefixes
+    # Move all capture artifacts into output_dir
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
         folder = os.path.dirname(bin_path)
         prefix = os.path.basename(folder)
         for fname in os.listdir(folder):
             src = os.path.join(folder, fname)
-            dst_name = f"{prefix}_{fname}"
-            dst = os.path.join(output_dir, dst_name)
+            dst = os.path.join(output_dir, f"{prefix}_{fname}")
             shutil.move(src, dst)
-        # clean up the now-empty folder
         try:
             os.rmdir(folder)
         except OSError:
             pass
-        # update bin_path to the moved file
-        moved_name = f"{prefix}_{os.path.basename(bin_path)}"
-        bin_path = os.path.join(output_dir, moved_name)
+        bin_path = os.path.join(output_dir, f"{prefix}_{os.path.basename(bin_path)}")
 
+    # Convert raw binary to voltage array
     return read_raw_samples(bin_path, scale)
 
 # Initialize attribute so callers can always access the last .bin path

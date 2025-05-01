@@ -81,7 +81,7 @@ class ACEClient:
         print(f"Connecting to ACE server at {host}...")
         mgr = adrc.ClientManager.Create()
         self.client = mgr.CreateRequestClient(host)
-        print(f"Connected to ACE server at {host}, initializing board...")
+        print(f"Connected to ACE server, initializing board...")
         # Initialize board
         self.client.NavigateToPath(UI_ROOT)
         self.client.AddHardwarePlugin(ACE_PLUGIN)
