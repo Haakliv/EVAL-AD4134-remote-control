@@ -113,6 +113,8 @@ class ACEClient:
             self.client.Run(
                 f'Evaluation.Control.SetIntParameter("PWRDN_CH{ch}",1,-1)'
             )
+        # High performance mode
+        self.client.Run('Evaluation.Control.SetIntParameter("virtual-parameter-power-mode",1,-1)')
         # Filter and data format settings
         self.client.Run(
             f'Evaluation.Control.SetIntParameter("virtual-parameter-filter-ch1",{code},-1)'
