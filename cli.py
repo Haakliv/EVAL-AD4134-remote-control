@@ -38,7 +38,7 @@ B29_HOST_DEFAULT     = '169.254.5.2'
 ADC_LSB              = MAX_INPUT_RANGE / (2 ** (ADC_RES_BITS - 1))
 
 # Default codes
-ADC_ODR_CODE_DEFAULT    = 7   # 363.636 kHz
+ADC_ODR_CODE_DEFAULT    = 1   # 1.25 MHz
 ADC_FILTER_CODE_DEFAULT = 2   # Sinc6
 
 SAMPLES_DEFAULT      = 131_072
@@ -210,48 +210,56 @@ def main():
 
     # ------------------- Noise floor -------------------
     if args.cmd == 'noise-floor':
-        print('=== Noise Floor Test ===')
-        ace = ACEClient(args.ace_host)
-        print(f"ACE @ {args.ace_host}, IP {ace.get_local_ip()}")
-        print(f"Using ODR={odr_rate:.0f}Hz (code={args.odr_code}), "
-              f"filter={filter_type} (code={args.filter_code})")
+        print('=== Noise Floor Test (multi-run) ===')
+        stds = []
+        hist_data = []
+        welch_psd_sum = None
+        for run in range(1, args.runs+1):
+            ace = ACEClient(args.ace_host)
+            ace.configure_board(
+                filter_code      = args.filter_code,
+                disable_channels = '0,2,3',
+                odr_code         = args.odr_code
+            )
+            bin_path = ace.capture(
+                sample_count = args.samples,
+                odr_code     = args.odr_code
+            )
+            raw = read_raw_samples(bin_file=bin_path, scale=ADC_LSB)
+            mean, std, ptp = compute_noise_floor_metrics(raw)
+            stds.append(std)
+            hist_data.append(raw)
 
-        ace.configure_board(
-            filter_code      = args.filter_code,
-            disable_channels = '0,2,3',
-            odr_code         = args.odr_code
-        )
-        bin_path = ace.capture(
-            sample_count = args.samples,
-            odr_code     = args.odr_code
-        )
-        print(f"Binary saved: {bin_path}")
+            # accumulate Welch PSDs
+            f, Pxx = welch(raw, fs=odr_rate, nperseg=args.samples//4, noverlap=args.samples//8)
+            if welch_psd_sum is None:
+                welch_psd_sum = Pxx
+            else:
+                welch_psd_sum += Pxx
 
-        os.chdir(os.path.dirname(bin_path))
+            print(f"Run {run:2d}: mean={mean:.3e} V, std={std:.3e} V, ptp={ptp:.3e} V")
 
-        # Read raw 24-bit samples into volts
-        raw = read_raw_samples(
-            bin_file   = bin_path,
-            scale      = ADC_LSB
-        )
+        # Final statistics
+        mean_std = np.mean(stds)
+        std_std  = np.std(stds, ddof=1)
+        print(f"\nAggregated RMS noise: {mean_std:.3e} V ± {std_std:.3e} V (run-to-run)")
 
-        mean, std, ptp = compute_noise_floor_metrics(raw)
-        print(f"Noise floor: mean={mean:.3e} V, std={std:.3e} V, pp={ptp:.3e} V")
-
+        # Aggregated plots
         if args.plot or args.show:
-            plot_raw(raw,
-                     out_file = args.plot and f"raw_{args.samples}.png",
-                     show     = args.show)
-        if args.histogram:
-            plot_histogram(raw,
-                           bins     = args.hist_bins,
-                           out_file = args.plot and f"hist_{args.samples}.png",
-                           show     = args.show)
-        if args.fft:
-            freqs, spectrum = fft_spectrum(raw, odr_rate)
-            plot_fft(freqs, spectrum,
-                     out_file = args.plot and f"fft_{args.samples}.png",
-                     show     = args.show)
+            # Combined histogram
+            all_raw = np.concatenate(hist_data)
+            if args.histogram:
+                plot_histogram(all_raw, bins=args.hist_bins,
+                               out_file=args.plot and 'agg_hist.png',
+                               show=args.show)
+            # Welch-averaged spectrum
+            if args.fft:
+                Pxx_avg = welch_psd_sum / args.runs
+                # convert PSD to magnitude spectrum
+                mag = np.sqrt(Pxx_avg * odr_rate/2)
+                plot_fft(f, mag,
+                         out_file=args.plot and 'agg_fft.png',
+                         show=args.show)
 
     # ------------------- SFDR, THD, ENOB -------------------
     elif args.cmd == 'sfdr':
