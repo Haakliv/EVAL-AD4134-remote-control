@@ -120,45 +120,75 @@ def plot_dc_gain(actual_vs, adc_means, out_file=None, show=False):
 # param filt: filter name (string)
 # param out_file: filename to save the figure (PNG)
 # param show: if True, display the plot interactively
+# -------------------------------------------------------------------------
 def plot_agg_histogram(raw_all, bins, runs, odr, filt,
                        out_file=None, show=False):
-    # --- raw → integer ADC codes -------------------------------------------
-    lsb       = MAX_INPUT_RANGE / (2 ** (ADC_RES_BITS - 1))
-    codes     = np.round(raw_all / lsb).astype(int)
+    """
+    Aggregate noise-floor histogram, x-axis in µV but bin edges aligned to
+    integer ADC codes → no “comb” effect between neighbour bars.
+    """
+    # --- constants ---------------------------------------------------------
+    lsb      = MAX_INPUT_RANGE / (2 ** (ADC_RES_BITS - 1))
+    lsb_uV   = lsb * MICRO
 
-    n_codes   = codes.max() - codes.min() + 1
-    grp_size  = max(1, int(np.ceil(n_codes / bins)))        # ≈ requested bins
-    edges_c   = np.arange(codes.min() - 0.5,
-                          codes.max() + 0.5 + grp_size,
-                          grp_size)
+    # --- raw voltage → integer codes --------------------------------------
+    codes    = np.round(raw_all / lsb).astype(int)
 
-    fig, ax   = plt.subplots()
-    counts, _, _ = ax.hist(codes, bins=edges_c,
-                           edgecolor='black', linewidth=0.5)
+    # choose code-aligned bin edges (same logic as before)
+    n_codes  = codes.max() - codes.min() + 1
+    grp_size = max(1, int(np.ceil(n_codes / bins)))          # ≈ requested bins
+    edges_c  = np.arange(codes.min() - 0.5,
+                         codes.max() + 0.5 + grp_size,
+                         grp_size)
 
-    # ---------- relabel x-ticks in µV --------------------------------------
-    tick_c    = np.linspace(codes.min(), codes.max(), 6, dtype=int)
-    tick_uV   = tick_c * lsb * MICRO
-    ax.set_xticks(tick_c)
-    ax.set_xticklabels([f"{v:.0f}" for v in tick_uV], rotation=45, ha='right')
-    ax.set_xlabel('Voltage [µV]')
-    ax.set_ylabel('Count')
+    # scale edges into µV so histogram x-axis is really µV
+    edges_uV = edges_c * lsb_uV
 
-    # ---------- Gaussian overlay (still computed in code units) ------------
-    mu      = raw_all.mean()
-    sigma   = raw_all.std(ddof=1)
-    bin_w_V = grp_size * lsb
-    centres = (edges_c[:-1] + edges_c[1:]) * 0.5 * lsb
-    pdf     = (1 / (sigma * np.sqrt(2*np.pi))) * np.exp(-0.5*((centres - mu)/sigma)**2)
-    ax.plot(centres / lsb, pdf * raw_all.size * bin_w_V,
-            'r-', linewidth=1, label='Gaussian fit')
+    # --- histogram --------------------------------------------------------
+    fig, ax = plt.subplots()
+    counts, _, _ = ax.hist(
+        raw_all * MICRO,          # data in µV
+        bins=edges_uV,            # µV edges aligned to codes
+        edgecolor="black",
+        linewidth=0.5,
+    )
 
-    # ---------- cosmetics ---------------------------------------------------
-    ax.set_title(f"{runs}-run Noise Floor Histogram\n@ ODR {odr/1e6:.1f} MHz – {filt}")
-    ax.xaxis.set_major_locator(MaxNLocator(nbins=6, prune='both'))
+    # --- horizontal grid only --------------------------------------------
+    ax.grid(True, axis="y", linestyle="--", linewidth=0.4, alpha=0.6)
+
+    # --- axis labels ------------------------------------------------------
+    ax.set_xlabel("Voltage [µV]")
+    ax.set_ylabel("Count")
+
+    # --- nice x-tick locations in µV -------------------------------------
+    from matplotlib.ticker import MaxNLocator
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=6, prune="both"))
+
+    # --- Gaussian overlay (all in µV) ------------------------------------
+    mu_uV    = raw_all.mean() * MICRO
+    sigma_uV = raw_all.std(ddof=1) * MICRO
+    bin_w_uV = edges_uV[1] - edges_uV[0]
+    centres  = (edges_uV[:-1] + edges_uV[1:]) * 0.5
+    pdf      = (
+        1.0 / (sigma_uV * np.sqrt(2 * np.pi))
+        * np.exp(-0.5 * ((centres - mu_uV) / sigma_uV) ** 2)
+    )
+    ax.plot(
+        centres,
+        pdf * raw_all.size * bin_w_uV,
+        "r-",
+        linewidth=1,
+        label="Gaussian fit",
+    )
+
+    # --- cosmetics --------------------------------------------------------
+    ax.set_title(
+        f"{runs}-run Noise Floor Histogram\n@ ODR {odr/1e6:.1f} MHz – {filt}"
+    )
     ax.legend()
     plt.tight_layout()
 
+    # --- save / show ------------------------------------------------------
     if out_file:
         plt.savefig(out_file, dpi=300)
     if show:
@@ -173,41 +203,27 @@ def plot_agg_histogram(raw_all, bins, runs, odr, filt,
 # param filt: filter name (string)
 # param out_file: filename to save the figure (PNG)
 # param show: if True, display the plot interactively
-def plot_agg_fft(freqs, mags, runs, odr, filt, out_file=None, show=False):
-    # 1) convert to dB
-    mags_db = 20.0 * np.log10(np.maximum(mags, np.finfo(float).tiny) / DB_REF)
+# param xmin_hz: minimum frequency to plot (Hz)
+def plot_agg_fft(freqs, mags, runs, odr, filt,
+                 out_file=None, show=False, xmin_hz=5e3):
+    mags_db = 20*np.log10(np.maximum(mags, np.finfo(float).tiny) / DB_REF)
 
-    # 2) start figure
+    # ------ mask below xmin_hz ------
+    keep          = freqs >= xmin_hz
+    freqs_plot    = freqs[keep] / 1e3   # kHz axis
+    mags_db_plot  = mags_db[keep]
+
     fig, ax = plt.subplots()
-    ax.semilogx(freqs, mags_db, lw=0.8)
-    ax.set_xlabel('Frequency [Hz]')
+    ax.plot(freqs_plot, mags_db_plot, lw=0.8)
+    ax.set_xlabel('Frequency [kHz]')
     ax.set_ylabel('Magnitude [dBV]')
     ax.set_title(f"{runs}-run Noise Floor PSD @ {odr/1e6:.1f} MHz – {filt}")
 
-    # 3) grid
     ax.grid(True, which='both', linestyle='--', linewidth=0.4)
 
-    # 4) dynamic y‐limits (10% padding)
-    y_min, y_max = mags_db.min(), mags_db.max()
-    pad = 0.1 * (y_max - y_min)
-    ax.set_ylim(y_min - pad, y_max + pad)
-
-    # 5) find & annotate the two largest non-DC spurs
-    """peaks, _ = find_peaks(mags_db, distance=5)
-    # ignore the very DC‐adjacent bin
-    valid = peaks[freqs[peaks] > odr*0.01]
-    top2 = sorted(valid, key=lambda i: mags_db[i], reverse=True)[:2]
-    for idx in top2:
-        f = freqs[idx]
-        db = mags_db[idx]
-        ax.annotate(
-            f"{f/1e3:.1f} kHz\n{db:.1f} dB",
-            xy=(f, db),
-            xytext=(0, 8),
-            textcoords='offset points',
-            ha='center',
-            arrowprops=dict(arrowstyle='->', lw=0.8)
-        )"""
+    # y-limit padding
+    pad = 0.10 * (mags_db_plot.max() - mags_db_plot.min())
+    ax.set_ylim(mags_db_plot.min() - pad, mags_db_plot.max() + pad)
 
     plt.tight_layout()
     if out_file:
