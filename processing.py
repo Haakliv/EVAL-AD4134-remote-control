@@ -1,5 +1,5 @@
 import numpy as np
-
+from scipy.signal import find_peaks
 
 # Compute the FFT magnitude spectrum of a real-valued signal.
 # param raw: 1D numpy array of time-domain samples
@@ -106,3 +106,35 @@ def compute_dc_gain_offset(applied, verified, adc):
     ss_tot = np.sum((y - np.mean(y))**2)
     r2 = 1 - ss_res/ss_tot
     return {'gain': m, 'offset': b, 'r2': r2}
+
+def find_spur_rms(freqs, spectrum, target_freq, span_hz=5e3):
+    """
+    Locate and return the RMS voltage (in volts) of the spur nearest target_freq.
+    
+    - freqs: array of FFT bin centers [Hz]
+    - spectrum: magnitude spectrum (peak values) [V_peak]
+    - target_freq: spur center frequency [Hz]
+    - span_hz: hunt ± this window around target_freq [Hz]
+    
+    Returns (spur_rms, actual_freq), where spur_rms = V_peak/√2, actual_freq = bin freq.
+    """
+    # 1) limit to a window around the target
+    mask = np.abs(freqs - target_freq) <= span_hz
+    idxs = np.nonzero(mask)[0]
+    if idxs.size == 0:
+        raise ValueError(f"No bins within ±{span_hz} Hz of {target_freq} Hz")
+    
+    # 2) find peaks in that window
+    sub = spectrum[idxs]
+    peaks, _ = find_peaks(sub, height=np.max(sub)*0.1)  # only peaks >10% of local max
+    if peaks.size == 0:
+        # fallback to the single largest bin
+        peak_idx = idxs[np.argmax(sub)]
+    else:
+        # pick the largest detected peak
+        peak_idx = idxs[peaks[np.argmax(sub[peaks])]]
+    
+    # 3) compute RMS from peak value
+    v_peak  = spectrum[peak_idx]
+    v_rms   = v_peak / np.sqrt(2)
+    return v_rms, freqs[peak_idx]

@@ -1,6 +1,11 @@
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.ticker import MaxNLocator
+from ace_client import MAX_INPUT_RANGE, ADC_RES_BITS
+from scipy.signal import find_peaks
+
+MICRO = 1e6          # volts → micro-volts conversion factor
+DB_REF = 1.0         # dB reference ( 1 V_rms ).  Change if you prefer dBVμ etc.
 
 # Plot time-domain raw data
 # param fs: sampling frequency (Hz)
@@ -115,25 +120,52 @@ def plot_dc_gain(actual_vs, adc_means, out_file=None, show=False):
 # param filt: filter name (string)
 # param out_file: filename to save the figure (PNG)
 # param show: if True, display the plot interactively
-def plot_agg_histogram(raw_all, bins, runs, odr, filt, out_file=None, show=False):
-    fig, ax = plt.subplots()
-    ax.hist(raw_all, bins=bins)
-    ax.set_xlabel('Voltage [V]')
+def plot_agg_histogram(raw_all, bins, runs, odr, filt,
+                       out_file=None, show=False):
+    # --- raw → integer ADC codes -------------------------------------------
+    lsb       = MAX_INPUT_RANGE / (2 ** (ADC_RES_BITS - 1))
+    codes     = np.round(raw_all / lsb).astype(int)
+
+    n_codes   = codes.max() - codes.min() + 1
+    grp_size  = max(1, int(np.ceil(n_codes / bins)))        # ≈ requested bins
+    edges_c   = np.arange(codes.min() - 0.5,
+                          codes.max() + 0.5 + grp_size,
+                          grp_size)
+
+    fig, ax   = plt.subplots()
+    counts, _, _ = ax.hist(codes, bins=edges_c,
+                           edgecolor='black', linewidth=0.5)
+
+    # ---------- relabel x-ticks in µV --------------------------------------
+    tick_c    = np.linspace(codes.min(), codes.max(), 6, dtype=int)
+    tick_uV   = tick_c * lsb * MICRO
+    ax.set_xticks(tick_c)
+    ax.set_xticklabels([f"{v:.0f}" for v in tick_uV], rotation=45, ha='right')
+    ax.set_xlabel('Voltage [µV]')
     ax.set_ylabel('Count')
-    ax.set_title(f"{runs}-run Noise Floor Histogram @ {odr:.0f}Hz ({filt})")
 
-    # fewer, rotated x-ticks so they don’t overlap
+    # ---------- Gaussian overlay (still computed in code units) ------------
+    mu      = raw_all.mean()
+    sigma   = raw_all.std(ddof=1)
+    bin_w_V = grp_size * lsb
+    centres = (edges_c[:-1] + edges_c[1:]) * 0.5 * lsb
+    pdf     = (1 / (sigma * np.sqrt(2*np.pi))) * np.exp(-0.5*((centres - mu)/sigma)**2)
+    ax.plot(centres / lsb, pdf * raw_all.size * bin_w_V,
+            'r-', linewidth=1, label='Gaussian fit')
+
+    # ---------- cosmetics ---------------------------------------------------
+    ax.set_title(f"{runs}-run Noise Floor Histogram\n@ ODR {odr/1e6:.1f} MHz – {filt}")
     ax.xaxis.set_major_locator(MaxNLocator(nbins=6, prune='both'))
-    plt.setp(ax.get_xticklabels(), rotation=45, ha='right')
-
+    ax.legend()
     plt.tight_layout()
+
     if out_file:
-        plt.savefig(out_file)
+        plt.savefig(out_file, dpi=300)
     if show:
         plt.show()
 
 
-# Plot aggregated FFT/PSD with runs, ODR, and filter info
+# Plot aggregated FFT/PSD with runs, ODR, and filter info in dB. Uses dB = 20·log10(mag / DB_REF) with DB_REF = 1 V_rms by default.
 # param freqs: frequency bins (Hz)
 # param mags: magnitude spectrum
 # param runs: number of runs performed
@@ -142,13 +174,43 @@ def plot_agg_histogram(raw_all, bins, runs, odr, filt, out_file=None, show=False
 # param out_file: filename to save the figure (PNG)
 # param show: if True, display the plot interactively
 def plot_agg_fft(freqs, mags, runs, odr, filt, out_file=None, show=False):
-    plt.figure()
-    plt.plot(freqs, mags)
-    plt.xlabel('Frequency [Hz]')
-    plt.ylabel('Magnitude')
-    plt.title(f"{runs}-run Noise Floor PSD @ {odr:.0f}Hz ({filt})")
+    # 1) convert to dB
+    mags_db = 20.0 * np.log10(np.maximum(mags, np.finfo(float).tiny) / DB_REF)
+
+    # 2) start figure
+    fig, ax = plt.subplots()
+    ax.semilogx(freqs, mags_db, lw=0.8)
+    ax.set_xlabel('Frequency [Hz]')
+    ax.set_ylabel('Magnitude [dBV]')
+    ax.set_title(f"{runs}-run Noise Floor PSD @ {odr/1e6:.1f} MHz – {filt}")
+
+    # 3) grid
+    ax.grid(True, which='both', linestyle='--', linewidth=0.4)
+
+    # 4) dynamic y‐limits (10% padding)
+    y_min, y_max = mags_db.min(), mags_db.max()
+    pad = 0.1 * (y_max - y_min)
+    ax.set_ylim(y_min - pad, y_max + pad)
+
+    # 5) find & annotate the two largest non-DC spurs
+    """peaks, _ = find_peaks(mags_db, distance=5)
+    # ignore the very DC‐adjacent bin
+    valid = peaks[freqs[peaks] > odr*0.01]
+    top2 = sorted(valid, key=lambda i: mags_db[i], reverse=True)[:2]
+    for idx in top2:
+        f = freqs[idx]
+        db = mags_db[idx]
+        ax.annotate(
+            f"{f/1e3:.1f} kHz\n{db:.1f} dB",
+            xy=(f, db),
+            xytext=(0, 8),
+            textcoords='offset points',
+            ha='center',
+            arrowprops=dict(arrowstyle='->', lw=0.8)
+        )"""
+
     plt.tight_layout()
     if out_file:
-        plt.savefig(out_file)
+        plt.savefig(out_file, dpi=300)
     if show:
         plt.show()
