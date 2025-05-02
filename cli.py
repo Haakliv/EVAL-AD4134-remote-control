@@ -164,7 +164,9 @@ def run_gen_spectrum(args, logger, ace):
     """Capture AWG-only PSD and store in NPZ for later subtraction."""
     odr = SLAVE_ODR_MAP[args.odr_code]
     gen = WaveformGenerator(args.sdg_host)
-    gen.sine(args.channel, args.freq, args.amplitude, args.offset)
+    fs_vpp = MAX_INPUT_RANGE * 10 ** (-0.5 / 20)
+    logger.info("Using %.6f Vpp (–0.5 dBFS) instead of %.6f Vpp", fs_vpp, args.amplitude)
+    gen.sine(args.channel, args.freq, fs_vpp, args.offset)
     logger.info("Capturing AWG baseline PSD: f=%.2f Hz, %.2f Vpp, offset=%.2f V",
                 args.freq, args.amplitude, args.offset)
 
@@ -387,6 +389,7 @@ def setup_parsers():
     sf.add_argument('--awg-cal', type=str,
                     help='NPZ file with AWG baseline PSD (from gen-spectrum)')
     add_common_adc_args(sf)
+    sf.set_defaults(odr_code=7)
     add_common_plot_args(sf)
 
     # --- Settling-time -------------------------------------------------------
