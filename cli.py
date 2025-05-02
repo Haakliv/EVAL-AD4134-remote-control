@@ -224,34 +224,69 @@ def run_sfdr(args, logger, ace):
 
 # -- Settling-time ------------------------------------------------------------
 def run_settling_time(args, logger, ace):
-    """Step-response settling-time measurement (time-domain)."""
+    """Step-response settling-time measurement (time-domain), repeated runs."""
     odr  = SLAVE_ODR_MAP[args.odr_code]
     filt = SINC_FILTER_MAP[args.filter_code]
-    logger.info("Settling: %.2f Vpp step @ %.2f Hz, offset=%.2f V, "
-                "threshold=%.3f, ODR=%.0f Hz, filter=%s",
-                args.amplitude, args.frequency, args.offset,
-                args.threshold, odr, filt)
+    logger.info(
+        "Settling-time: %.2f Vpp step @ %.2f Hz, offset=%.2f V, "
+        "threshold=%.3f, ODR=%.0f Hz, filter=%s, runs=%d",
+        args.amplitude, args.frequency, args.offset,
+        args.threshold, odr, filt, args.runs
+    )
 
+    # Configure AWG for a pulse train
     gen = WaveformGenerator(args.sdg_host)
     gen.pulse(args.channel, args.frequency, args.amplitude, args.offset)
 
-    raw = capture_samples(
-        ace, args.samples, ADC_LSB, args.odr_code, output_dir=os.getcwd()
-    )
-    settling = compute_settling_time(
-        raw, odr, args.threshold * (args.amplitude / 2)
-    )
-    if settling is not None:
-        logger.info("Settling time: %.2f ms", settling * 1e3)
-    else:
-        logger.warning("Settling time not detected within capture window")
-
-    if args.plot or args.show:
-        plot_settling(
-            raw, odr,
-            out_file=args.plot and f"settling_{args.samples}.png",
-            show=args.show
+    # If no-board mode, just verify AWG settings and exit
+    if getattr(args, 'no_board', False):
+        logger.info("Generator verification only; skipping ADC capture.")
+        logger.info(
+            "AWG actual: rep rate=%.3f Hz, Vpp=%.3f V, offset=%.3f V",
+            gen.sdg.get_frequency(args.channel),
+            gen.sdg.get_amplitude(args.channel),
+            gen.sdg.get_offset(args.channel)
         )
+        gen.disable(args.channel)
+        return
+
+    # Perform multiple captures and compute settling times
+    settle_times = []
+    for run in range(1, args.runs + 1):
+        raw = capture_samples(
+            ace, args.samples, ADC_LSB, args.odr_code,
+            output_dir=os.getcwd()
+        )
+
+        t = compute_settling_time(
+            raw, odr, args.threshold * (args.amplitude / 2)
+        )
+        if t is not None:
+            settle_times.append(t)
+            logger.info("Run %d: Settling time = %.2f ms", run, t * 1e3)
+        else:
+            logger.warning("Run %d: Settling not detected within window", run)
+
+        # Optionally plot each run (or just the last one)
+        if args.plot or args.show:
+            plot_settling(
+                raw, odr,
+                out_file=(args.plot and f"settling_run{run}.png"),
+                show=args.show
+            )
+
+    # Summarize over all successful runs
+    if settle_times:
+        mean_t = np.mean(settle_times)
+        std_t  = np.std(settle_times, ddof=1)
+        logger.info(
+            "Mean settling time: %.2f ms ± %.2f ms (n=%d)",
+            mean_t * 1e3, std_t * 1e3, len(settle_times)
+        )
+    else:
+        logger.error("No valid settling-time measurements obtained.")
+
+    # Clean up AWG
     gen.disable(args.channel)
 
 # -- Frequency response -------------------------------------------------------
@@ -403,6 +438,8 @@ def setup_parsers():
     st.add_argument('--frequency', type=float, default=1.0, help='rep rate [Hz]')
     st.add_argument('--threshold', type=float, default=SETTLING_THRESH_FRAC,
                     help='settling threshold (fraction of ½-step)')
+    st.add_argument('--no-board', dest='no_board', action='store_true',
+                    help='skip ADC capture (AWG-only verification)')
     add_common_adc_args(st)
     add_common_plot_args(st)
 
