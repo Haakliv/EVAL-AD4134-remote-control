@@ -7,6 +7,7 @@ import datetime
 import logging
 import os
 import numpy as np
+import time
 from scipy.signal import welch, csd
 
 # --- Project-local modules ---------------------------------------------------
@@ -42,6 +43,8 @@ SDG_HOST_DEFAULT  = '172.16.1.56'
 B29_HOST_DEFAULT  = '169.254.5.2'
 
 ADC_LSB           = MAX_INPUT_RANGE / (2**(ADC_RES_BITS - 1))
+DEFAULT_STEP_VPP  = MAX_INPUT_RANGE * 0.9
+LOW_PCT = 50.0
 
 ADC_ODR_CODE_DEFAULT    = 1      # 1.25 MHz
 ADC_FILTER_CODE_DEFAULT = 2      # Sinc6
@@ -222,72 +225,115 @@ def run_sfdr(args, logger, ace):
                 sfdr_v, thd_v, sinad_v, enob_v)
     gen.disable(args.channel)
 
-# -- Settling-time ------------------------------------------------------------
+# -- Settling‑time ------------------------------------------------------------
+import time
+import numpy as np
+
+# -----------------------------------------------------------------------------
+import time
+import numpy as np
+
+# --------------------------------------------------------------------------
 def run_settling_time(args, logger, ace):
-    """Step-response settling-time measurement (time-domain), repeated runs."""
+    """
+    Differential settling‑time test for AD4134.
+
+    * CH1 -> ADC IN+   (normal polarity)
+    * CH2 -> ADC IN-   (inverted via OUTP PLRT,INVT)
+
+    Uses the SDG6022X delay (DLY) so the output sits LOW first, then steps.
+    """
     odr  = SLAVE_ODR_MAP[args.odr_code]
     filt = SINC_FILTER_MAP[args.filter_code]
+
     logger.info(
-        "Settling-time: %.2f Vpp step @ %.2f Hz, offset=%.2f V, "
-        "threshold=%.3f, ODR=%.0f Hz, filter=%s, runs=%d",
-        args.amplitude, args.frequency, args.offset,
-        args.threshold, odr, filt, args.runs
+        "Settling-time: Vpp=%.2f V, offset=%.2f V, rep_rate=%.2f Hz, "
+        "threshold=%.3f of half-step, ODR=%.0f Hz, filter=%s, runs=%d%s",
+        args.amplitude, args.offset, args.frequency,
+        args.threshold, odr, filt, args.runs,
+        " (AWG-only)" if getattr(args, "no_board", False) else ""
     )
 
-    # Configure AWG for a pulse train
+    # -------------------------- 1. AWG CONFIG ------------------------------
     gen = WaveformGenerator(args.sdg_host)
-    gen.pulse(args.channel, args.frequency, args.amplitude, args.offset)
 
-    # If no-board mode, just verify AWG settings and exit
-    if getattr(args, 'no_board', False):
-        logger.info("Generator verification only; skipping ADC capture.")
+    # Positive leg (CH1)
+    gen.pulse(
+        channel=1,
+        frequency=args.frequency,
+        amplitude=args.amplitude,
+        offset=args.offset,
+        low_pct=LOW_PCT,
+        edge_time=2e-9
+    )
+
+    gen.pulse(
+        channel=2,
+        frequency=args.frequency,
+        amplitude=args.amplitude,
+        offset=args.offset,
+        low_pct=LOW_PCT,
+        edge_time=2e-9
+    )
+    gen.sdg.interface.write("C2:OUTP PLRT,INVT")   # invert CH2
+
+    # AWG‑verification‑only path
+    if getattr(args, "no_board", False):
         logger.info(
-            "AWG actual: rep rate=%.3f Hz, Vpp=%.3f V, offset=%.3f V",
-            gen.sdg.get_frequency(args.channel),
-            gen.sdg.get_amplitude(args.channel),
-            gen.sdg.get_offset(args.channel)
+            "AWG only: CH1 freq=%.3f Hz, Vpp=%.3f V, offset=%.3f V",
+            gen.sdg.get_frequency(1),
+            gen.sdg.get_amplitude(1),
+            gen.sdg.get_offset(1)
         )
-        gen.disable(args.channel)
+        logger.info("          CH2 polarity set to INVT")
+        gen.disable(1); gen.disable(2)
         return
 
-    # Perform multiple captures and compute settling times
-    settle_times = []
-    for run in range(1, args.runs + 1):
+    # ------------------------- 2. CAPTURE LOOP -----------------------------
+    raw_runs, settle_times = [], []
+
+    for n in range(1, args.runs + 1):
         raw = capture_samples(
             ace, args.samples, ADC_LSB, args.odr_code,
             output_dir=os.getcwd()
         )
 
-        t = compute_settling_time(
-            raw, odr, args.threshold * (args.amplitude / 2)
+        t_settle = compute_settling_time(
+            raw, fs=odr,
+            threshold=args.threshold * (args.amplitude / 2)
         )
-        if t is not None:
-            settle_times.append(t)
-            logger.info("Run %d: Settling time = %.2f ms", run, t * 1e3)
+
+        if t_settle is not None:
+            settle_times.append(t_settle)
+            raw_runs.append(raw)
+            logger.info("Run %d: %.2f ms", n, t_settle * 1e3)
         else:
-            logger.warning("Run %d: Settling not detected within window", run)
+            logger.warning("Run %d: settling not detected", n)
 
-        # Optionally plot each run (or just the last one)
-        if args.plot or args.show:
-            plot_settling(
-                raw, odr,
-                out_file=(args.plot and f"settling_run{run}.png"),
-                show=args.show
-            )
-
-    # Summarize over all successful runs
+    # --------------------------- 3. SUMMARY --------------------------------
     if settle_times:
-        mean_t = np.mean(settle_times)
-        std_t  = np.std(settle_times, ddof=1)
+        st = np.array(settle_times)
+        mean  = st.mean()
+        std   = st.std(ddof=1)
+        ci95  = 1.96 * std / np.sqrt(len(st))
         logger.info(
-            "Mean settling time: %.2f ms ± %.2f ms (n=%d)",
-            mean_t * 1e3, std_t * 1e3, len(settle_times)
+            "Settling time = %.2f ms ± %.2f ms (95 %% CI, n=%d)",
+            mean * 1e3, ci95 * 1e3, len(st)
         )
     else:
-        logger.error("No valid settling-time measurements obtained.")
+        logger.error("No valid measurements obtained")
 
-    # Clean up AWG
-    gen.disable(args.channel)
+    # --------------------------- 4. PLOT -----------------------------------
+    if (args.plot or args.show) and raw_runs:
+        plot_settling(
+            raw_runs if len(raw_runs) > 1 else raw_runs[0],
+            fs=odr,
+            out_file=args.plot and "settling_all_runs.png",
+            show=args.show
+        )
+
+    # --------------------------- 5. CLEAN‑UP -------------------------------
+    gen.disable(1); gen.disable(2)
 
 # -- Frequency response -------------------------------------------------------
 def run_freq_response(args, logger, ace):
@@ -433,13 +479,15 @@ def setup_parsers():
                     default=SDG_HOST_DEFAULT, help='SDG address')
     st.add_argument('--channel', type=int, choices=[1, 2], default=1,
                     help='SDG channel')
-    st.add_argument('--amplitude', type=float, default=8.0, help='step Vpp')
+    st.add_argument('--amplitude', type=float, default=DEFAULT_STEP_VPP, help='step Vpp')
     st.add_argument('--offset', type=float, default=0.0, help='offset [V]')
     st.add_argument('--frequency', type=float, default=1.0, help='rep rate [Hz]')
     st.add_argument('--threshold', type=float, default=SETTLING_THRESH_FRAC,
                     help='settling threshold (fraction of ½-step)')
     st.add_argument('--no-board', dest='no_board', action='store_true',
                     help='skip ADC capture (AWG-only verification)')
+    st.add_argument('--start-wait', type=float, default=0.5,
+                help='seconds to wait after enabling the AWG before the first capture')
     add_common_adc_args(st)
     add_common_plot_args(st)
 
@@ -482,7 +530,7 @@ def setup_parsers():
 def main():
     args = setup_parsers().parse_args()
 
-    # --- Per-run output directory -------------------------------------------
+    # --- Per‑run output directory -------------------------------------------
     root = 'Measurements'
     os.makedirs(root, exist_ok=True)
     tstamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -501,9 +549,11 @@ def main():
     logger.info("Starting '%s' test", args.cmd)
 
     # --- ADC board configuration --------------------------------------------
-    ace = ACEClient(args.ace_host)
-    ace.configure_board(filter_code=args.filter_code,
-                        disable_channels='0,2,3')
+    ace = None                     # only connect if we actually need the board
+    if not getattr(args, 'no_board', False):
+        ace = ACEClient(args.ace_host)
+        ace.configure_board(filter_code=args.filter_code,
+                            disable_channels='0,2,3')
 
     # --- Dispatch ------------------------------------------------------------
     if   args.cmd == 'noise-floor':   run_noise_floor(args, logger, ace)

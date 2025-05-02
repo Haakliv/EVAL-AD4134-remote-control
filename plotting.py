@@ -66,19 +66,63 @@ def plot_fft(freqs, spectrum, out_file=None, show=False):
 # param fs: sampling frequency (Hz)
 # param out_file: filename to save the figure (PNG)
 # param show: if True, display the plot interactively
-def plot_settling(raw, fs, out_file=None, show=False):
-    t = np.arange(raw.size) / fs
+def plot_settling(raw, fs, out_file=None, show=False, legend=True):
+    """
+    Plot one or many settling‑time captures.
+
+    Parameters
+    ----------
+    raw       : np.ndarray | Iterable[np.ndarray]
+        Single capture or list/tuple of captures (all same length).
+    fs        : float
+        Sampling frequency [Hz].
+    out_file  : str | None      – PNG filename.
+    show      : bool            – call plt.show().
+    legend    : bool            – add legend when multiple runs supplied.
+    """
+    # --- normalise input to a list of 1‑D arrays --------------------------
+    if isinstance(raw, np.ndarray):
+        runs = [raw]
+    elif isinstance(raw, Iterable):
+        runs = list(raw)
+        if not all(isinstance(r, np.ndarray) for r in runs):
+            raise TypeError("Every element in raw must be a NumPy array")
+    else:
+        raise TypeError("raw must be an array or iterable of arrays")
+
+    n = len(runs)
+    t = np.arange(runs[0].size) / fs
+
     plt.figure()
-    plt.plot(t, raw)
-    plt.axhline(np.mean(raw[int(0.9*raw.size):]), linestyle='--')
-    plt.xlabel('Time [s]')
-    plt.ylabel('Voltage [V]')
-    plt.title('Settling Transient')
+    for idx, r in enumerate(runs, 1):
+        α = 0.4 if n > 1 else 1.0          # light grey for individual runs
+        plt.plot(t, r, color="grey", alpha=α,
+                 label=f"Run {idx}" if legend and n > 1 else None)
+
+    # --- aggregate --------------------------------------------------------
+    if n > 1:
+        mean_trace = np.mean(np.vstack(runs), axis=0)
+        plt.plot(t, mean_trace, color="C0", linewidth=2,
+                 label="Mean" if legend else None)
+        ref_level = mean_trace[int(0.9 * mean_trace.size):].mean()
+    else:
+        ref_level = runs[0][int(0.9 * runs[0].size):].mean()
+
+    plt.axhline(ref_level, linestyle="--", color="C1", linewidth=1,
+                label="Final value" if legend else None)
+
+    plt.xlabel("Time [s]")
+    plt.ylabel("Voltage [V]")
+    plt.title(f"Settling transient ({n} run{'s' if n > 1 else ''})")
+    if legend and (n > 1):
+        plt.legend()
     plt.tight_layout()
+
     if out_file:
-        plt.savefig(out_file)
+        plt.savefig(out_file, dpi=150)
     if show:
         plt.show()
+    plt.close()
 
 
 # Plot frequency response
