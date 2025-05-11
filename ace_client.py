@@ -88,14 +88,12 @@ class ACEClient:
         self.client.set_ContextPath(CTX_BOARD)
         self.client.NavigateToPath(UI_BOARD)
         self.client.Run('@Reset()')
-        time.sleep(2)
+        time.sleep(1)
         # Initialize driver
         self.client.set_ContextPath(CTX_DRIVER)
         self.client.NavigateToPath(UI_DRIVER)
         self.client.Run('@Initialization()')
-        time.sleep(1)
         self.client.Run('@GetStatusFromBoard()')
-        time.sleep(1)
 
     # Return the ACE server's IP address.
     def get_local_ip(self):
