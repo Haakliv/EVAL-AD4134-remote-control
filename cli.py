@@ -236,104 +236,129 @@ import numpy as np
 # --------------------------------------------------------------------------
 def run_settling_time(args, logger, ace):
     """
-    Differential settling‑time test for AD4134.
-
-    * CH1 -> ADC IN+   (normal polarity)
-    * CH2 -> ADC IN-   (inverted via OUTP PLRT,INVT)
-
-    Uses the SDG6022X delay (DLY) so the output sits LOW first, then steps.
+    AD4134 settling-time test using simple sample-based edge/flattop detection.
     """
-    odr  = SLAVE_ODR_MAP[args.odr_code]
-    filt = SINC_FILTER_MAP[args.filter_code]
 
-    logger.info(
-        "Settling-time: Vpp=%.2f V, offset=%.2f V, rep_rate=%.2f Hz, "
-        "threshold=%.3f of half-step, ODR=%.0f Hz, filter=%s, runs=%d%s",
-        args.amplitude, args.offset, args.frequency,
-        args.threshold, odr, filt, args.runs,
-        " (AWG-only)" if getattr(args, "no_board", False) else ""
-    )
+    # ----- device / filter parameters -----
+    odr        = SLAVE_ODR_MAP[args.odr_code]       # e.g. 1_250_000 Hz
+    filt       = SINC_FILTER_MAP[args.filter_code]  # 'Sinc6'
+    order      = int(filt.replace("Sinc", ""))      # ≈6
+    Ts_us      = 1e6 / odr
+    guard_samp = int(np.ceil((order + 1) / 2))      # 4
+    hold_samp  = order // 2                         # 3
 
-    # -------------------------- 1. AWG CONFIG ------------------------------
+    # ±1 LSB_eff band  (≈60µV @1.25MSPS)
+    VREF       = 4.096
+    LSB_eff_uV = 2 * VREF / 2**17 * 1e6             # ≈60µV
+
+    logger.info("Settling test: ODR=%.0fHz, %s, guard=%d, hold=%d, runs=%d",
+                odr, filt, guard_samp, hold_samp, args.runs)
+
+    # ----- configure AWG -----
     gen = WaveformGenerator(args.sdg_host)
+    gen.pulse_diff(args.frequency, args.amplitude, args.offset,
+                   low_pct=50.0, edge_time=2e-9)
+    time.sleep(0.5)  # let output stabilize
 
-    # Positive leg (CH1)
-    gen.pulse(
-        channel=1,
-        frequency=args.frequency,
-        amplitude=args.amplitude,
-        offset=args.offset,
-        low_pct=LOW_PCT,
-        edge_time=2e-9
-    )
+    # ----- capture & compute -----
+    raw_runs     = []
+    start_idxs   = []
+    end_idxs     = []
+    start_times  = []
+    end_times    = []
+    times_ns     = []
 
-    gen.pulse(
-        channel=2,
-        frequency=args.frequency,
-        amplitude=args.amplitude,
-        offset=args.offset,
-        low_pct=LOW_PCT,
-        edge_time=2e-9
-    )
-    gen.sdg.interface.write("C2:OUTP PLRT,INVT")   # invert CH2
-
-    # AWG‑verification‑only path
-    if getattr(args, "no_board", False):
-        logger.info(
-            "AWG only: CH1 freq=%.3f Hz, Vpp=%.3f V, offset=%.3f V",
-            gen.sdg.get_frequency(1),
-            gen.sdg.get_amplitude(1),
-            gen.sdg.get_offset(1)
-        )
-        logger.info("          CH2 polarity set to INVT")
-        gen.disable(1); gen.disable(2)
-        return
-
-    # ------------------------- 2. CAPTURE LOOP -----------------------------
-    raw_runs, settle_times = [], []
-
-    for n in range(1, args.runs + 1):
+    for run in range(1, args.runs + 1):
         raw = capture_samples(
             ace, args.samples, ADC_LSB, args.odr_code,
             output_dir=os.getcwd()
         )
+        raw_runs.append(raw)
 
-        t_settle = compute_settling_time(
-            raw, fs=odr,
-            threshold=args.threshold * (args.amplitude / 2)
+        idx_start, idx_end, Ts, segment = compute_settling_time(
+            raw, fs=odr, tol_uV=LSB_eff_uV
         )
 
-        if t_settle is not None:
-            settle_times.append(t_settle)
-            raw_runs.append(raw)
-            logger.info("Run %d: %.2f ms", n, t_settle * 1e3)
-        else:
-            logger.warning("Run %d: settling not detected", n)
+        if idx_start is None or idx_end is None:
+            logger.warning("Run %d: settling not detected", run)
+            continue
 
-    # --------------------------- 3. SUMMARY --------------------------------
-    if settle_times:
-        st = np.array(settle_times)
-        mean  = st.mean()
-        std   = st.std(ddof=1)
-        ci95  = 1.96 * std / np.sqrt(len(st))
-        logger.info(
-            "Settling time = %.2f ms ± %.2f ms (95 %% CI, n=%d)",
-            mean * 1e3, ci95 * 1e3, len(st)
-        )
+        # record
+        t_start = idx_start * Ts
+        t_end   = idx_end   * Ts
+        dt_us   = t_end - t_start
+
+        start_idxs.append(idx_start)
+        end_idxs.append(idx_end)
+        start_times.append(t_start)
+        end_times.append(t_end)
+        times_ns.append(dt_us * 1e3)
+
+        logger.info("Run %d: start at %.2fus, end at %.2fus (Delta=%.2fus)",
+                    run, t_start, t_end, dt_us)
+
+    # disable AWG once, after all runs
+    gen.disable(1)
+    gen.disable(2)
+
+    # ----- summary -----
+    if times_ns:
+        arr  = np.array(times_ns)
+        mean = arr.mean()
+        std  = arr.std(ddof=1) if arr.size > 1 else 0.0
+        ci95 = 1.96 * std / np.sqrt(arr.size) if arr.size > 1 else 0.0
+
+        print(f"Settling time: {mean/1e3:.2f} ± {ci95/1e3:.2f} µs")
+        print(f"Start (avg): {np.mean(start_times):.2f} µs")
+        print(f"End   (avg): {np.mean(end_times):.2f} µs")
     else:
         logger.error("No valid measurements obtained")
+        return
 
-    # --------------------------- 4. PLOT -----------------------------------
-    if (args.plot or args.show) and raw_runs:
-        plot_settling(
-            raw_runs if len(raw_runs) > 1 else raw_runs[0],
-            fs=odr,
-            out_file=args.plot and "settling_all_runs.png",
-            show=args.show
-        )
+    # ----- plot settling regions -----
+    if (args.plot or args.show) and raw_runs and start_idxs:
+        import matplotlib.pyplot as plt
 
-    # --------------------------- 5. CLEAN‑UP -------------------------------
-    gen.disable(1); gen.disable(2)
+        pad = int(5.0 / Ts_us)  # 5µs padding
+        plt.figure(figsize=(10, 6))
+
+        for i, (raw, s_idx, e_idx) in enumerate(
+            zip(raw_runs, start_idxs, end_idxs), start=1
+        ):
+            start = max(0, s_idx - pad)
+            end   = min(len(raw), e_idx + pad)
+            seg   = raw[start:end]
+            t     = (np.arange(start, end) * Ts_us) - (s_idx * Ts_us)
+
+            plt.plot(t, seg, label=f'Run {i}')
+            plt.axvline(0,         linestyle='--', alpha=0.5,
+                        label='_nolegend_' if i>1 else 'Edge (t=0)')
+            t_exit_rel = (e_idx * Ts_us) - (s_idx * Ts_us)
+            plt.axvline(t_exit_rel, linestyle=':', alpha=0.5,
+                        label='_nolegend_' if i>1 else 'Settling end')
+            plt.axvspan(0, t_exit_rel, alpha=0.1,
+                        label='_nolegend_' if i>1 else 'Settling window')
+
+        plt.xlabel('Time relative to edge (µs)')
+        plt.ylabel('ADC code / voltage')
+        plt.title('ADC Settling Behavior')
+        plt.grid(True, alpha=0.3)
+        plt.legend(ncol=2, fontsize='small')
+
+        # ±1 LSB_eff band
+        final = np.mean(raw_runs[0][end_idxs[0]-hold_samp : end_idxs[0]])
+        plt.axhspan(final - LSB_eff_uV*1e-6,
+                    final + LSB_eff_uV*1e-6,
+                    color='green', alpha=0.1,
+                    label='±1 LSB_eff')
+
+        plt.tight_layout()
+        if args.show:
+            plt.show()
+        else:
+            out = os.path.join(os.getcwd(), 'settling_detail.png')
+            plt.savefig(out, dpi=300)
+            print(f"Saved settling detail plot to {out}")
 
 # -- Frequency response -------------------------------------------------------
 def run_freq_response(args, logger, ace):
@@ -481,9 +506,7 @@ def setup_parsers():
                     help='SDG channel')
     st.add_argument('--amplitude', type=float, default=DEFAULT_STEP_VPP, help='step Vpp')
     st.add_argument('--offset', type=float, default=0.0, help='offset [V]')
-    st.add_argument('--frequency', type=float, default=1.0, help='rep rate [Hz]')
-    st.add_argument('--threshold', type=float, default=SETTLING_THRESH_FRAC,
-                    help='settling threshold (fraction of ½-step)')
+    st.add_argument('--frequency', type=float, default=100.0, help='rep rate [Hz]')
     st.add_argument('--no-board', dest='no_board', action='store_true',
                     help='skip ADC capture (AWG-only verification)')
     st.add_argument('--start-wait', type=float, default=0.5,

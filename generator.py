@@ -5,6 +5,13 @@ from ace_client import limit_vpp_offset, MAX_INPUT_RANGE
 class WaveformGenerator:
     def __init__(self, host='192.168.1.100'):
         self.sdg = Sdg6022x(host)
+        self.disable(1)
+        self.disable(2)
+
+    # Disable output on the specified channel
+    def disable(self, channel):
+        self.sdg.disable_output(channel)
+
 
     # Generate a sine wave
     # param channel: Output channel (1 or 2)
@@ -28,50 +35,50 @@ class WaveformGenerator:
         self.sdg.set_frequency(frequency, channel)
         self.sdg.set_amplitude(safe_vpp, channel)
         self.sdg.set_offset(offset, channel)
+        self.sdg.set_output_load('50', channel)
         self.sdg.enable_output(channel)
 
-    def pulse(
+    # ------------------------------------------------------------------
+    # Differential pulse: CH1 normal, CH2 inverted, outputs enabled last
+    # ------------------------------------------------------------------
+    def pulse_diff(
         self,
-        channel: int,
         frequency: float,
         amplitude: float,
         offset: float,
-        low_pct: float = 90.0,
-        edge_time: float | None = None,
+        low_pct: float = 80.0,     # 4 ms low, 1 ms high at 200 Hz
+        edge_time: float = 2e-9,
+        ch_pos: int = 1,
+        ch_neg: int = 2,
     ):
-        """
-        Step‑style pulse that *waits* at the LOW level before rising.
+        max_in = MAX_INPUT_RANGE*2
+        if abs(offset) > max_in:
+            offset = max_in if offset > 0 else -max_in
 
-        Parameters
-        ----------
-        channel   : 1 | 2
-        frequency : Hz – repetition rate
-        amplitude : Vpp – peak‑to‑peak swing
-        offset    : V   – DC offset
-        low_pct   : %   – portion of each period held LOW (default 90 %)
-        edge_time : s   – optional rise/fall time; omit for instrument default
-        """
         safe_vpp = limit_vpp_offset(amplitude, offset)
+        if safe_vpp <= 0:
+            raise ValueError("Offset too close to rail for given Vpp")
 
-        period    = 1.0 / frequency
-        high_pct  = 100.0 - low_pct            # generator wants %HIGH
-        delay_sec = period * (low_pct / 100.0)
+        high_pct = 100.0 - low_pct  # SDG’s DUTY = %HIGH
 
-        cmd = (
-            f"C{channel}:BSWV "
-            f"WVTP,PULSE,"
-            f"FRQ,{frequency},"
-            f"DUTY,{high_pct},"
-            f"DLY,{delay_sec},"
-            f"AMP,{safe_vpp},"
-            f"OFST,{offset},"
-            f"RISE,{edge_time},FALL,{edge_time}"
-        )
+        for ch in (ch_pos, ch_neg):
+            self.sdg.set_waveform("PULSE", ch)
+            self.sdg.set_frequency(frequency, ch)
+            self.sdg.set_amplitude(safe_vpp, ch)
+            self.sdg.set_offset(offset, ch)
 
-        self.sdg.interface.write(cmd)
-        self.sdg.enable_output(channel)
+            # correct 50 Ω load, error in library
+            self.sdg.interface.write(f"C{ch}:OUTP LOAD,50")
 
+            # pulse specifics
+            self.sdg.interface.write(f"C{ch}:BSWV DUTY,{high_pct}")
+            self.sdg.interface.write(f"C{ch}:BSWV DLY,0")
+            self.sdg.interface.write(f"C{ch}:BSWV RISE,{edge_time}")
+            self.sdg.interface.write(f"C{ch}:BSWV FALL,{edge_time}")
 
-    # Disable output on the specified channel
-    def disable(self, channel):
-        self.sdg.disable_output(channel)
+        # invert negative leg before outputs go ON
+        self.sdg.interface.write(f"C{ch_neg}:OUTP PLRT,INVT")
+
+        # enable outputs
+        self.sdg.enable_output(ch_pos)
+        self.sdg.enable_output(ch_neg)

@@ -61,56 +61,52 @@ def compute_metrics(freqs, spectrum, f0, num_harmonics=5):
 import numpy as np
 
 # --------------------------------------------------------------------------
-def compute_settling_time(raw, fs, threshold, min_plateau_frac=0.1):
+def compute_settling_time(
+    raw: np.ndarray,
+    fs: float,
+    tol_uV: float,
+):
     """
-    Estimate settling time of a step response.
-
-    Parameters
-    ----------
-    raw   : 1‑D NumPy array of voltage samples.
-    fs    : float – sample rate [Hz].
-    threshold : float – absolute voltage band around the final value
-                        regarded as "settled".
-    min_plateau_frac : float – fraction of record used to estimate
-                                   initial and final plateaus (default 0.1).
-
-    Returns
-    -------
-    settling_time : float | None
-        Time (seconds) from the step instant to the point where the
-        response remains within ±threshold of the final value.
-        Returns None if settling is not achieved within the record.
+    Simple sample‐based settling‐time detection:
+      - Edge: first rising step > tol
+      - Settling: first of three consecutive samples within tol of final value
+    Returns (settling_start_idx, settling_end_idx, Ts_us, segment)
+    or (None, None, None, None) if not found.
     """
-    n = raw.size
-    if n == 0:
-        return None
+    Ts_us = 1e6 / fs
+    thr   = tol_uV * 1e-6
+    settling_start = None
+    settling_end   = None
 
-    span = int(n * min_plateau_frac)
-    if span < 1:
-        span = 1
+    # 1) find rising edge
+    for i in range(1, len(raw)):
+        if raw[i] - raw[i - 1] > thr:
+            settling_start = i-1
+            break
+    if settling_start is None:
+        return None, None, None, None
 
-    # --- estimate initial and final levels -------------------------------
-    v_init  = np.mean(raw[:span])
-    v_final = np.mean(raw[-span:])
+    # 2) find falling edge (to avoid using that region for final level)
+    fall_idxs = np.where(np.diff(raw) < -thr)[0]
+    if fall_idxs.size > 0:
+        idx_fall = fall_idxs[0] + 1
+    else:
+        idx_fall = len(raw)
 
-    # --- find the step instant ------------------------------------------
-    half_level = (v_init + v_final) / 2.0
+    # 3) compute the “final” plateau level from the 3 samples just before idx_fall
+    start_plateau = max(settling_start, idx_fall - 3)
+    final_val = float(np.mean(raw[start_plateau:idx_fall]))
 
-    # index where the trace first crosses half‑way between initial + final
-    # (works for both positive and negative steps)
-    step_idx = np.argmax(
-        np.abs(raw - half_level) < np.abs(v_final - v_init) * 0.25
-    )
-    t_step = step_idx / fs
+    # 4) look for first run of 3 consecutive samples within tol of final_val
+    for j in range(settling_start + 1, idx_fall - 2):
+        window = raw[j : j + 3]
+        if np.all(np.abs(window - final_val) < thr):
+            settling_end = j
+            break
 
-    # --- search for first point that stays settled until the end ---------
-    within = np.abs(raw - v_final) <= threshold
-    for i in range(step_idx, n):
-        if within[i] and np.all(within[i:]):
-            return (i / fs) - t_step
-
-    return None
-
+    # 5) return indices, sample period, and the raw segment for inspection
+    segment = raw[settling_start : settling_end]
+    return settling_start, settling_end, Ts_us, segment
 
 # Compute the -db_down dB bandwidth from a gain sweep.
 # param freqs: array of stimulus frequencies (Hz)

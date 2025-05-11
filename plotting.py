@@ -3,6 +3,9 @@ import numpy as np
 from matplotlib.ticker import MaxNLocator
 from ace_client import MAX_INPUT_RANGE, ADC_RES_BITS
 from scipy.signal import find_peaks
+from collections.abc import Iterable
+from processing import compute_settling_time
+import math
 
 MICRO = 1e6          # volts → micro-volts conversion factor
 DB_REF = 1.0         # dB reference ( 1 V_rms ).  Change if you prefer dBVμ etc.
@@ -66,64 +69,130 @@ def plot_fft(freqs, spectrum, out_file=None, show=False):
 # param fs: sampling frequency (Hz)
 # param out_file: filename to save the figure (PNG)
 # param show: if True, display the plot interactively
-def plot_settling(raw, fs, out_file=None, show=False, legend=True):
+
+def plot_settling(
+    raws: list[np.ndarray],      # Raw data arrays (one per run)
+    fs: float,                   # ADC sampling rate [Hz]
+    order: int,                  # Decimation filter order
+    odr: float,                  # Output data rate [Hz]
+    settle_start_us: float,         # Settle start time [µs]
+    settle_end_us: float,           # Settle end time [µs]
+    hold_samp: int,              # Hold-window length (samples) – for legend text
+    tol_uV: float | None = None, # Band value retained in signature; omitted in plot
+    pre_us: float = 3.0,         # Time before edge to show baseline [µs]
+    post_gd: float = 0.7,        # Extent after edge as multiple of group delay
+    show_sample_grid: bool = True,
+    out_file: str | None = None,
+    show: bool = False,
+):
+    """Single-panel settling plot showing only mean results
+    • t = 0 at first displayed sample; rising-edge at t = pre_us.
+    • Only the **mean** Settle Start and End are marked.
     """
-    Plot one or many settling‑time captures.
+    Ts_us = 1e6 / fs
+    gd_us = (order + 1) / (2 * odr) * 1e6
+    post_us = post_gd * gd_us
+    
+    # Calculate aligned data with the SAME edge detection approach for both raw and mean
+    aligned_data = []
+    edges = []
+    
+    # Step 1: Detect edges using same approach for all traces
+    for r in raws:
+        diff = np.diff(r)
+        if not np.any(diff):
+            edge_idx = 0
+        elif np.all(diff <= 0):
+            edge_idx = np.argmin(diff) + 1
+        else:
+            edge_idx = np.argmax(diff) + 1
+        edges.append(edge_idx)
+    
+    # Plot
+    fig, ax = plt.subplots(figsize=(8, 4))
+    
+    # Step 2: Calculate number of samples to include before/after edge
+    pre_samples = int(pre_us / Ts_us)
+    post_samples = int(post_us / Ts_us)
+    
+    # Step 3: Create time axis once - this will be used for all plots
+    t = np.arange(-pre_samples, post_samples + 1) * Ts_us
+    
+    # Step 4: Plot raw traces with exact same alignment
+    for i, (r, edge) in enumerate(zip(raws, edges)):
+        # Extract window around edge
+        start_idx = max(0, edge - pre_samples)
+        end_idx = min(r.size, edge + post_samples + 1)
+        
+        # Get the actual slice
+        slice_data = r[start_idx:end_idx]
+        
+        # Calculate offset if we couldn't get full pre window
+        offset = pre_samples - (edge - start_idx)
+        
+        # Create time values for this slice
+        slice_t = t[offset:offset+len(slice_data)]
+        
+        # Plot raw trace
+        ax.plot(slice_t, slice_data, color='0.75', alpha=0.7,
+                label='Raw (each run)' if i == 0 else None)
+        
+        # Store aligned data for mean calculation
+        aligned_data.append((slice_t, slice_data))
+    
+    # Step 5: Calculate mean trace - use the same windowing/alignment approach
+    # First, create a common time grid
+    t_common = np.arange(-pre_samples, post_samples + 1) * Ts_us
+    mean_data = np.zeros_like(t_common)
+    count = np.zeros_like(t_common)
+    
+    # Add each aligned trace to the mean
+    for t_slice, data_slice in aligned_data:
+        # Find where this slice maps to common time grid
+        for i, t_val in enumerate(t_slice):
+            idx = np.argmin(np.abs(t_common - t_val))
+            mean_data[idx] += data_slice[i]
+            count[idx] += 1
+    
+    # Divide by count to get mean (avoiding div by zero)
+    mean_data = np.where(count > 0, mean_data / count, np.nan)
+    
+    # Step 6: Plot mean trace
+    ax.plot(t_common, mean_data, color='C0', lw=2, label='Mean')
 
-    Parameters
-    ----------
-    raw       : np.ndarray | Iterable[np.ndarray]
-        Single capture or list/tuple of captures (all same length).
-    fs        : float
-        Sampling frequency [Hz].
-    out_file  : str | None      – PNG filename.
-    show      : bool            – call plt.show().
-    legend    : bool            – add legend when multiple runs supplied.
-    """
-    # --- normalise input to a list of 1‑D arrays --------------------------
-    if isinstance(raw, np.ndarray):
-        runs = [raw]
-    elif isinstance(raw, Iterable):
-        runs = list(raw)
-        if not all(isinstance(r, np.ndarray) for r in runs):
-            raise TypeError("Every element in raw must be a NumPy array")
-    else:
-        raise TypeError("raw must be an array or iterable of arrays")
+    #start time line
+    ax.axvline(t_common[0], linestyle='--', color='C1', lw=1.5,)
+    #0 time line
+    ax.axvline(0, linestyle='--', color='C2', lw=1.5,)
+    # middle of ramp time line
+    
 
-    n = len(runs)
-    t = np.arange(runs[0].size) / fs
-
-    plt.figure()
-    for idx, r in enumerate(runs, 1):
-        α = 0.4 if n > 1 else 1.0          # light grey for individual runs
-        plt.plot(t, r, color="grey", alpha=α,
-                 label=f"Run {idx}" if legend and n > 1 else None)
-
-    # --- aggregate --------------------------------------------------------
-    if n > 1:
-        mean_trace = np.mean(np.vstack(runs), axis=0)
-        plt.plot(t, mean_trace, color="C0", linewidth=2,
-                 label="Mean" if legend else None)
-        ref_level = mean_trace[int(0.9 * mean_trace.size):].mean()
-    else:
-        ref_level = runs[0][int(0.9 * runs[0].size):].mean()
-
-    plt.axhline(ref_level, linestyle="--", color="C1", linewidth=1,
-                label="Final value" if legend else None)
-
-    plt.xlabel("Time [s]")
-    plt.ylabel("Voltage [V]")
-    plt.title(f"Settling transient ({n} run{'s' if n > 1 else ''})")
-    if legend and (n > 1):
-        plt.legend()
-    plt.tight_layout()
-
+    # setle time lines
+    ax.axvline(-2.4+settle_start_us, linestyle='--', color='k', lw=1.5,
+               label=f'Mean Settle Start ({settle_start_us:.2f} µs)')
+    ax.axvline(-2.4+settle_end_us, linestyle='--', color='C3', lw=1.5,
+               label=f'Mean Settle End ({settle_end_us:.2f} µs)')
+    
+    # Sample grid
+    if show_sample_grid:
+        for n in range(-pre_samples, post_samples + 1):
+            ax.axvline(n * Ts_us, color='0.88', lw=0.5, zorder=-1)
+    
+    # Cosmetics
+    ax.set_xlim(t_common[0], t_common[-1])
+    ax.set_ylim(-4.5, 4.5)
+    ax.set_xlabel('Time [µs]')
+    ax.set_ylabel('Voltage [V]')
+    ax.set_title(f'Settling transient ({len(raws)} runs)')
+    ax.xaxis.set_major_locator(plt.MultipleLocator(0.8))  # Use Ts_us for tick spacing
+    ax.grid(True, axis='x', linestyle=':', alpha=0.5)
+    ax.legend(loc='upper left')
+    
     if out_file:
-        plt.savefig(out_file, dpi=150)
+        fig.savefig(out_file, dpi=300, bbox_inches='tight')
     if show:
         plt.show()
-    plt.close()
-
+    plt.close(fig)
 
 # Plot frequency response
 # param freqs: array of frequency bins (Hz)

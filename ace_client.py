@@ -54,12 +54,12 @@ MAX_INPUT_RANGE = 4.096  # ±4.096 V input range of AD4134
 
 # Ensure that requested peak-to-peak voltage and offset do not exceed input range.
 # Returns a safe Vpp value (<= 2*(max_input - abs(offset))).
-def limit_vpp_offset(requested_vpp, offset, max_input=MAX_INPUT_RANGE):
-    allowed_vpp = 2 * (max_input - abs(offset))
+def limit_vpp_offset(requested_vpp, offset):
+    allowed_vpp = 2 * (MAX_INPUT_RANGE - abs(offset))
     if requested_vpp > allowed_vpp:
         print(
             f"Warning: requested Vpp={requested_vpp} Vpp with offset={offset} V"
-            f" exceeds input range ±{max_input} V. Limiting to {allowed_vpp:.4f} Vpp."
+            f" exceeds input range ±{MAX_INPUT_RANGE} V. Limiting to {allowed_vpp:.4f} Vpp."
         )
         return allowed_vpp
     return requested_vpp
