@@ -65,48 +65,52 @@ def compute_settling_time(
     raw: np.ndarray,
     fs: float,
     tol_uV: float,
+    final_offset_us: float = 6.0,
+    final_duration_us: float = 3.0,
+    min_stable_samples: int = 5,
 ):
     """
-    Simple sample‐based settling‐time detection:
-      - Edge: first rising step > tol
-      - Settling: first of three consecutive samples within tol of final value
-    Returns (settling_start_idx, settling_end_idx, Ts_us, segment)
-    or (None, None, None, None) if not found.
+    Settling-time detection with:
+      - 1× LSB edge detection
+      - robust final‐value estimation (after step)
+      - ‘N consecutive samples within tolerance’ settling condition
     """
     Ts_us = 1e6 / fs
-    thr   = tol_uV * 1e-6
-    settling_start = None
-    settling_end   = None
 
-    # 1) find rising edge
+    # 1) detect the step edge
+    settling_start = None
     for i in range(1, len(raw)):
-        if raw[i] - raw[i - 1] > thr:
-            settling_start = i-1
+        if raw[i] - raw[i-1] > tol_uV:
+            settling_start = i - 1
             break
     if settling_start is None:
         return None, None, None, None
 
-    # 2) find falling edge (to avoid using that region for final level)
-    fall_idxs = np.where(np.diff(raw) < -thr)[0]
-    if fall_idxs.size > 0:
-        idx_fall = fall_idxs[0] + 1
-    else:
-        idx_fall = len(raw)
+    # 2) estimate the final value from a later window
+    idx0 = int(settling_start + final_offset_us  / Ts_us)
+    idx1 = int(idx0            + final_duration_us/ Ts_us)
+    if idx1 > len(raw):
+        return None, None, None, None
+    final_val = float(raw[idx0:idx1].mean())
 
-    # 3) compute the “final” plateau level from the 3 samples just before idx_fall
-    start_plateau = max(settling_start, idx_fall - 3)
-    final_val = float(np.mean(raw[start_plateau:idx_fall]))
-
-    # 4) look for first run of 3 consecutive samples within tol of final_val
-    for j in range(settling_start + 1, idx_fall - 2):
-        window = raw[j : j + 3]
-        if np.all(np.abs(window - final_val) < thr):
-            settling_end = j
+    # 3) find the first index i where the next N samples are all within ±thr of final_val
+    settling_end = None
+    last_start = len(raw) - min_stable_samples + 1
+    for i in range(settling_start+1, last_start):
+        block = raw[i : i + min_stable_samples]
+        if np.all(np.abs(block - final_val) < tol_uV):
+            # mark settling point at the end of the stable block
+            settling_end = i
             break
 
-    # 5) return indices, sample period, and the raw segment for inspection
+    if settling_end is None:
+        # never saw N in a row within tolerance
+        return settling_start, None, Ts_us, raw[settling_start:]
+
+    # extract the transient segment up to the settling point
     segment = raw[settling_start : settling_end]
     return settling_start, settling_end, Ts_us, segment
+
 
 # Compute the -db_down dB bandwidth from a gain sweep.
 # param freqs: array of stimulus frequencies (Hz)

@@ -249,7 +249,7 @@ def run_settling_time(args, logger, ace):
 
     # ±1 LSB_eff band  (≈60µV @1.25MSPS)
     VREF       = 4.096
-    LSB_eff_uV = 2 * VREF / 2**17 * 1e6             # ≈60µV
+    LSB_eff_uV = 2 * VREF / 2**17             # ≈60µV
 
     logger.info("Settling test: ODR=%.0fHz, %s, guard=%d, hold=%d, runs=%d",
                 odr, filt, guard_samp, hold_samp, args.runs)
@@ -309,8 +309,6 @@ def run_settling_time(args, logger, ace):
         ci95 = 1.96 * std / np.sqrt(arr.size) if arr.size > 1 else 0.0
 
         print(f"Settling time: {mean/1e3:.2f} ± {ci95/1e3:.2f} µs")
-        print(f"Start (avg): {np.mean(start_times):.2f} µs")
-        print(f"End   (avg): {np.mean(end_times):.2f} µs")
     else:
         logger.error("No valid measurements obtained")
         return
