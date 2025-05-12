@@ -57,43 +57,39 @@ def compute_metrics(freqs, spectrum, f0, num_harmonics=5):
 
     return sfdr, thd, sinad, enob
 
-
-import numpy as np
-
-# --------------------------------------------------------------------------
 def compute_settling_time(
     raw: np.ndarray,
     fs: float,
     tol_uV: float,
     final_offset_us: float = 6.0,
     final_duration_us: float = 3.0,
-    min_stable_samples: int = 5,
+    min_stable_samples: int = 10,
 ):
     """
     Settling-time detection with:
-      - 1× LSB edge detection
-      - robust final‐value estimation (after step)
-      - ‘N consecutive samples within tolerance’ settling condition
+      - 1x LSB edge detection
+      - robust final-value estimation (after step)
+      - N consecutive samples within tolerance settling condition
     """
     Ts_us = 1e6 / fs
 
-    # 1) detect the step edge
+    # 1 detect the step edge
     settling_start = None
     for i in range(1, len(raw)):
         if raw[i] - raw[i-1] > tol_uV:
             settling_start = i - 1
             break
     if settling_start is None:
-        return None, None, None, None
+        return None, None, None
 
-    # 2) estimate the final value from a later window
+    # 2 estimate the final value from a later window
     idx0 = int(settling_start + final_offset_us  / Ts_us)
     idx1 = int(idx0            + final_duration_us/ Ts_us)
     if idx1 > len(raw):
-        return None, None, None, None
+        return None, None, None
     final_val = float(raw[idx0:idx1].mean())
 
-    # 3) find the first index i where the next N samples are all within ±thr of final_val
+    # 3 find the first index i where the next N samples are all within ±thr of final_val
     settling_end = None
     last_start = len(raw) - min_stable_samples + 1
     for i in range(settling_start+1, last_start):
@@ -105,12 +101,61 @@ def compute_settling_time(
 
     if settling_end is None:
         # never saw N in a row within tolerance
-        return settling_start, None, Ts_us, raw[settling_start:]
+        return None, None, None
 
-    # extract the transient segment up to the settling point
-    segment = raw[settling_start : settling_end]
-    return settling_start, settling_end, Ts_us, segment
+    return settling_start, settling_end, Ts_us
 
+def compute_mean_settling_time(
+    raw_runs: list[np.ndarray],
+    start_idxs: list[int],
+    end_idxs:   list[int],
+    Ts_us:      float,
+    pad:        int = 2
+) -> tuple[float, float, float, np.ndarray, np.ndarray]:
+    """
+    Compute and return the mean settling trace, truncated to pad samples 
+    before edge and pad samples after the settling end.
+    Returns:
+      mean_start_us, mean_end_us, mean_delta_us,
+      time_vec_us (truncated), mean_segment (truncated)
+    """
+    # 1 per-run times
+    t_starts = np.array(start_idxs) * Ts_us
+    t_ends   = np.array(end_idxs)   * Ts_us
+    deltas   = t_ends - t_starts
+
+    mean_delta = deltas.mean()
+
+    # 2 find equal-length window across runs
+    pre_samps   = min(start_idxs)
+    post_samps  = min(len(raw) - end for raw, end in zip(raw_runs, end_idxs))
+    delta_samps = min(e - s for s, e in zip(start_idxs, end_idxs))
+
+    total_len = pre_samps + delta_samps + post_samps
+
+    aligned = []
+    for raw, s_idx in zip(raw_runs, start_idxs):
+        seg = raw[s_idx - pre_samps : s_idx - pre_samps + total_len]
+        aligned.append(seg)
+    aligned = np.vstack(aligned)
+
+    # 3 full mean trace
+    mean_trace = aligned.mean(axis=0)
+
+    # 4 full time vector (us)
+    time_full = (np.arange(-pre_samps, -pre_samps + total_len) * Ts_us)
+
+    # 5 now truncate to pad around t=0 and t=mean_delta
+    # find indices
+    zero_idx = np.searchsorted(time_full, 0)
+    end_idx  = np.searchsorted(time_full, mean_delta)
+    start_i  = max(0, zero_idx - pad)
+    stop_i   = min(len(time_full), end_idx + pad)
+
+    time_trunc = time_full[start_i:stop_i]
+    trace_trunc = mean_trace[start_i:stop_i]
+
+    return mean_delta, time_trunc, trace_trunc
 
 # Compute the -db_down dB bandwidth from a gain sweep.
 # param freqs: array of stimulus frequencies (Hz)

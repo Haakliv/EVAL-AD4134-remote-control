@@ -8,7 +8,7 @@ import logging
 import os
 import numpy as np
 import time
-from scipy.signal import welch, csd
+from scipy.signal import welch
 
 # --- Project-local modules ---------------------------------------------------
 from ace_client import (
@@ -25,6 +25,7 @@ from processing  import (
     fft_spectrum,
     compute_metrics,
     compute_settling_time,
+    compute_mean_settling_time,
     compute_bandwidth,
     compute_dc_gain_offset,
     find_spur_rms,
@@ -32,7 +33,7 @@ from processing  import (
 from plotting    import (
     plot_agg_fft,
     plot_agg_histogram,
-    plot_settling,
+    plot_settling_time,
     plot_freq_response,
     plot_dc_gain,
 )
@@ -226,39 +227,25 @@ def run_sfdr(args, logger, ace):
     gen.disable(args.channel)
 
 # -- Settling‑time ------------------------------------------------------------
-import time
-import numpy as np
-
-# -----------------------------------------------------------------------------
-import time
-import numpy as np
-
-# --------------------------------------------------------------------------
 def run_settling_time(args, logger, ace):
     """
     AD4134 settling-time test using simple sample-based edge/flattop detection.
     """
-
-    # ----- device / filter parameters -----
-    odr        = SLAVE_ODR_MAP[args.odr_code]       # e.g. 1_250_000 Hz
-    filt       = SINC_FILTER_MAP[args.filter_code]  # 'Sinc6'
-    order      = int(filt.replace("Sinc", ""))      # ≈6
+    odr        = SLAVE_ODR_MAP[args.odr_code]
+    filt       = SINC_FILTER_MAP[args.filter_code]
     Ts_us      = 1e6 / odr
-    guard_samp = int(np.ceil((order + 1) / 2))      # 4
-    hold_samp  = order // 2                         # 3
 
     # ±1 LSB_eff band  (≈60µV @1.25MSPS)
-    VREF       = 4.096
-    LSB_eff_uV = 2 * VREF / 2**17             # ≈60µV
+    LSB_eff_uV = 2 * MAX_INPUT_RANGE / 2**17.3 # ≈60µV at 17.3 ENOB
 
-    logger.info("Settling test: ODR=%.0fHz, %s, guard=%d, hold=%d, runs=%d",
-                odr, filt, guard_samp, hold_samp, args.runs)
+    logger.info("Settling test: ODR=%.0fHz, %s, runs=%d, Vpp=%.2f, freq=%.1fHz",
+                odr, filt, args.runs, args.amplitude, args.frequency)
 
     # ----- configure AWG -----
     gen = WaveformGenerator(args.sdg_host)
     gen.pulse_diff(args.frequency, args.amplitude, args.offset,
                    low_pct=50.0, edge_time=2e-9)
-    time.sleep(0.5)  # let output stabilize
+    time.sleep(0.5)
 
     # ----- capture & compute -----
     raw_runs     = []
@@ -275,7 +262,7 @@ def run_settling_time(args, logger, ace):
         )
         raw_runs.append(raw)
 
-        idx_start, idx_end, Ts, segment = compute_settling_time(
+        idx_start, idx_end, Ts = compute_settling_time(
             raw, fs=odr, tol_uV=LSB_eff_uV
         )
 
@@ -283,7 +270,7 @@ def run_settling_time(args, logger, ace):
             logger.warning("Run %d: settling not detected", run)
             continue
 
-        # record
+        # record per-run
         t_start = idx_start * Ts
         t_end   = idx_end   * Ts
         dt_us   = t_end - t_start
@@ -294,76 +281,46 @@ def run_settling_time(args, logger, ace):
         end_times.append(t_end)
         times_ns.append(dt_us * 1e3)
 
-        logger.info("Run %d: start at %.2fus, end at %.2fus (Delta=%.2fus)",
-                    run, t_start, t_end, dt_us)
+        logger.info("Run %d: Delta=%.2fus", run, dt_us)
 
-    # disable AWG once, after all runs
     gen.disable(1)
     gen.disable(2)
 
-    # ----- summary -----
-    if times_ns:
-        arr  = np.array(times_ns)
-        mean = arr.mean()
-        std  = arr.std(ddof=1) if arr.size > 1 else 0.0
-        ci95 = 1.96 * std / np.sqrt(arr.size) if arr.size > 1 else 0.0
-
-        print(f"Settling time: {mean/1e3:.2f} ± {ci95/1e3:.2f} µs")
-    else:
+    # ----- mean-settling summary & logging -----
+    if not start_idxs or not end_idxs:
         logger.error("No valid measurements obtained")
         return
 
-    # ----- plot settling regions -----
+    # compute and log the mean settling across all runs
+    mean_delta, time_vec, mean_seg = compute_mean_settling_time(raw_runs, start_idxs, end_idxs, Ts_us, pad=2)
+    arr    = np.array(times_ns)                # in nanoseconds
+    mean_ns = arr.mean()
+    std_ns  = arr.std(ddof=1) if arr.size > 1 else 0.0
+    ci95_ns = 1.96 * std_ns / np.sqrt(arr.size) if arr.size > 1 else 0.0
+
+    # log mean pm95% CI and std (all converted to us)
+    logger.info(
+        "Mean settling: %.2f µs ± %.2f µs (95%% CI), std=%.2f µs over %d runs",
+        mean_ns*1e-3, ci95_ns*1e-3, std_ns*1e-3, arr.size
+    )
+
     if (args.plot or args.show) and raw_runs and start_idxs:
-        import matplotlib.pyplot as plt
-
-        pad = int(5.0 / Ts_us)  # 5µs padding
-        plt.figure(figsize=(10, 6))
-
-        for i, (raw, s_idx, e_idx) in enumerate(
-            zip(raw_runs, start_idxs, end_idxs), start=1
-        ):
-            start = max(0, s_idx - pad)
-            end   = min(len(raw), e_idx + pad)
-            seg   = raw[start:end]
-            t     = (np.arange(start, end) * Ts_us) - (s_idx * Ts_us)
-
-            plt.plot(t, seg, label=f'Run {i}')
-            plt.axvline(0,         linestyle='--', alpha=0.5,
-                        label='_nolegend_' if i>1 else 'Edge (t=0)')
-            t_exit_rel = (e_idx * Ts_us) - (s_idx * Ts_us)
-            plt.axvline(t_exit_rel, linestyle=':', alpha=0.5,
-                        label='_nolegend_' if i>1 else 'Settling end')
-            plt.axvspan(0, t_exit_rel, alpha=0.1,
-                        label='_nolegend_' if i>1 else 'Settling window')
-
-        plt.xlabel('Time relative to edge (µs)')
-        plt.ylabel('ADC code / voltage')
-        plt.title('ADC Settling Behavior')
-        plt.grid(True, alpha=0.3)
-        plt.legend(ncol=2, fontsize='small')
-
-        # ±1 LSB_eff band
-        final = np.mean(raw_runs[0][end_idxs[0]-hold_samp : end_idxs[0]])
-        plt.axhspan(final - LSB_eff_uV*1e-6,
-                    final + LSB_eff_uV*1e-6,
-                    color='green', alpha=0.1,
-                    label='±1 LSB_eff')
-
-        plt.tight_layout()
-        if args.show:
-            plt.show()
-        else:
-            out = os.path.join(os.getcwd(), 'settling_detail.png')
-            plt.savefig(out, dpi=300)
-            print(f"Saved settling detail plot to {out}")
+        plot_file = os.path.join(os.getcwd(), 'settling.png')
+        plot_settling_time(
+            raw_runs, start_idxs, end_idxs,
+            Ts_us, time_vec, mean_seg, mean_delta,
+            filt, odr,
+            args.frequency, args.amplitude, args.runs,
+            out_file=plot_file,
+            show=args.show
+        )
 
 # -- Frequency response -------------------------------------------------------
 def run_freq_response(args, logger, ace):
     """AC gain and –3 dB bandwidth sweep with optional AWG subtraction."""
     odr  = SLAVE_ODR_MAP[args.odr_code]
     filt = SINC_FILTER_MAP[args.filter_code]
-    logger.info("Freq-response: %.1f–%.1f Hz (%d pts), %.2f Vpp, "
+    logger.info("Freq-response: %.1f-%.1f Hz (%d pts), %.2f Vpp, "
                 "offset=%.2f V, ODR=%.0f Hz, filter=%s",
                 args.freq_start, args.freq_stop, args.points,
                 args.amplitude, args.offset, odr, filt)

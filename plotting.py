@@ -1,11 +1,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.ticker import MaxNLocator
 from ace_client import MAX_INPUT_RANGE, ADC_RES_BITS
-from scipy.signal import find_peaks
-from collections.abc import Iterable
-from processing import compute_settling_time
-import math
 
 MICRO = 1e6          # volts → micro-volts conversion factor
 DB_REF = 1.0         # dB reference ( 1 V_rms ).  Change if you prefer dBVμ etc.
@@ -64,135 +59,84 @@ def plot_fft(freqs, spectrum, out_file=None, show=False):
         plt.show()
 
 
-# Plot settling transient
-# param raw: 1D array of voltage samples
-# param fs: sampling frequency (Hz)
-# param out_file: filename to save the figure (PNG)
-# param show: if True, display the plot interactively
-
-def plot_settling(
-    raws: list[np.ndarray],      # Raw data arrays (one per run)
-    fs: float,                   # ADC sampling rate [Hz]
-    order: int,                  # Decimation filter order
-    odr: float,                  # Output data rate [Hz]
-    settle_start_us: float,         # Settle start time [µs]
-    settle_end_us: float,           # Settle end time [µs]
-    hold_samp: int,              # Hold-window length (samples) – for legend text
-    tol_uV: float | None = None, # Band value retained in signature; omitted in plot
-    pre_us: float = 3.0,         # Time before edge to show baseline [µs]
-    post_gd: float = 0.7,        # Extent after edge as multiple of group delay
-    show_sample_grid: bool = True,
-    out_file: str | None = None,
-    show: bool = False,
+def plot_settling_time(
+    raw_runs: list[np.ndarray],
+    start_idxs: list[int],
+    end_idxs:   list[int],
+    Ts_us:      float,
+    time_vec:   np.ndarray,
+    mean_seg:   np.ndarray,
+    mean_delta: float,
+    filt:       str,
+    odr:        float,
+    frequency:  float,
+    amplitude:  float,
+    runs:       int,
+    out_file:   str = None,
+    show:       bool = False,
 ):
-    """Single-panel settling plot showing only mean results
-    • t = 0 at first displayed sample; rising-edge at t = pre_us.
-    • Only the **mean** Settle Start and End are marked.
     """
-    Ts_us = 1e6 / fs
-    gd_us = (order + 1) / (2 * odr) * 1e6
-    post_us = post_gd * gd_us
-    
-    # Calculate aligned data with the SAME edge detection approach for both raw and mean
-    aligned_data = []
-    edges = []
-    
-    # Step 1: Detect edges using same approach for all traces
-    for r in raws:
-        diff = np.diff(r)
-        if not np.any(diff):
-            edge_idx = 0
-        elif np.all(diff <= 0):
-            edge_idx = np.argmin(diff) + 1
-        else:
-            edge_idx = np.argmax(diff) + 1
-        edges.append(edge_idx)
-    
-    # Plot
-    fig, ax = plt.subplots(figsize=(8, 4))
-    
-    # Step 2: Calculate number of samples to include before/after edge
-    pre_samples = int(pre_us / Ts_us)
-    post_samples = int(post_us / Ts_us)
-    
-    # Step 3: Create time axis once - this will be used for all plots
-    t = np.arange(-pre_samples, post_samples + 1) * Ts_us
-    
-    # Step 4: Plot raw traces with exact same alignment
-    for i, (r, edge) in enumerate(zip(raws, edges)):
-        # Extract window around edge
-        start_idx = max(0, edge - pre_samples)
-        end_idx = min(r.size, edge + post_samples + 1)
-        
-        # Get the actual slice
-        slice_data = r[start_idx:end_idx]
-        
-        # Calculate offset if we couldn't get full pre window
-        offset = pre_samples - (edge - start_idx)
-        
-        # Create time values for this slice
-        slice_t = t[offset:offset+len(slice_data)]
-        
-        # Plot raw trace
-        ax.plot(slice_t, slice_data, color='0.75', alpha=0.7,
-                label='Raw (each run)' if i == 0 else None)
-        
-        # Store aligned data for mean calculation
-        aligned_data.append((slice_t, slice_data))
-    
-    # Step 5: Calculate mean trace - use the same windowing/alignment approach
-    # First, create a common time grid
-    t_common = np.arange(-pre_samples, post_samples + 1) * Ts_us
-    mean_data = np.zeros_like(t_common)
-    count = np.zeros_like(t_common)
-    
-    # Add each aligned trace to the mean
-    for t_slice, data_slice in aligned_data:
-        # Find where this slice maps to common time grid
-        for i, t_val in enumerate(t_slice):
-            idx = np.argmin(np.abs(t_common - t_val))
-            mean_data[idx] += data_slice[i]
-            count[idx] += 1
-    
-    # Divide by count to get mean (avoiding div by zero)
-    mean_data = np.where(count > 0, mean_data / count, np.nan)
-    
-    # Step 6: Plot mean trace
-    ax.plot(t_common, mean_data, color='C0', lw=2, label='Mean')
+    Plots per-run traces in gray, then overlays the mean settling trace.
+    Matches signature style of your other plot_* functions.
 
-    #start time line
-    ax.axvline(t_common[0], linestyle='--', color='C1', lw=1.5,)
-    #0 time line
-    ax.axvline(0, linestyle='--', color='C2', lw=1.5,)
-    # middle of ramp time line
-    
+    :param raw_runs:  list of raw sample arrays
+    :param start_idxs: list of start-indices per run
+    :param end_idxs:   list of end-indices per run
+    :param Ts_us:      sampling period in µs
+    :param time_vec:   truncated time vector for mean trace (µs)
+    :param mean_seg:   truncated mean trace
+    :param mean_delta: mean settling time (µs)
+    :param odr:        sampling rate (Hz)
+    :param frequency:  stimulus frequency (Hz)
+    :param amplitude:  stimulus amplitude (Vpp)
+    :param runs:       number of runs
+    :param out_file:   filename to save the figure (PNG)
+    :param show:       if True, display the plot interactively
+    """
+    pad = 2  # two samples before and after
 
-    # setle time lines
-    ax.axvline(-2.4+settle_start_us, linestyle='--', color='k', lw=1.5,
-               label=f'Mean Settle Start ({settle_start_us:.2f} µs)')
-    ax.axvline(-2.4+settle_end_us, linestyle='--', color='C3', lw=1.5,
-               label=f'Mean Settle End ({settle_end_us:.2f} µs)')
-    
-    # Sample grid
-    if show_sample_grid:
-        for n in range(-pre_samples, post_samples + 1):
-            ax.axvline(n * Ts_us, color='0.88', lw=0.5, zorder=-1)
-    
-    # Cosmetics
-    ax.set_xlim(t_common[0], t_common[-1])
-    ax.set_ylim(-4.5, 4.5)
-    ax.set_xlabel('Time [µs]')
-    ax.set_ylabel('Voltage [V]')
-    ax.set_title(f'Settling transient ({len(raws)} runs)')
-    ax.xaxis.set_major_locator(plt.MultipleLocator(0.8))  # Use Ts_us for tick spacing
-    ax.grid(True, axis='x', linestyle=':', alpha=0.5)
-    ax.legend(loc='upper left')
-    
+    plt.figure(figsize=(10, 6))
+
+    # individual runs in gray
+    for raw, s_idx, e_idx in zip(raw_runs, start_idxs, end_idxs):
+        start = max(0, s_idx)
+        end   = min(len(raw), e_idx + pad)
+        t     = (np.arange(start, end) * Ts_us) - (s_idx * Ts_us)
+        seg   = raw[start:end]
+        plt.plot(t, seg, color='gray', alpha=0.2)
+
+    # truncate out the very first sample of the mean trace
+    t_mean = time_vec[1:]
+    seg_mean = mean_seg[1:]
+
+    # mean trace overlay
+    plt.plot(t_mean, seg_mean, label='Mean Settling', linewidth=2)
+    plt.axvline(0, linestyle=':', label='Mean start', linewidth=2)
+    plt.axvline(mean_delta, linestyle='--', label='Mean end', linewidth=2)
+    plt.axvspan(0, mean_delta, alpha=0.2, label='Mean window')
+
+    # labels & ticks
+    plt.xlabel('Time relative to edge (µs)')
+    plt.ylabel('Voltage')
+
+    # x‐ticks every 0.8µs from the truncated window bounds
+    min_t, max_t = t_mean[0], t_mean[-1]
+    plt.xticks(np.arange(min_t, max_t + 1e-9, 0.8))
+
+    # title with all parameters
+    plt.title(
+        f"{runs}-run Settling Transient\n"
+        f"@ {frequency:.1f}Hz, {amplitude:.2f}Vpp, {filt} - ODR {odr/1e6:.2f}MHz"
+    )
+
+    plt.grid(axis='x', which='major', alpha=0.3)
+    plt.legend(ncol=2, fontsize='small')
+    plt.tight_layout()
+
     if out_file:
-        fig.savefig(out_file, dpi=300, bbox_inches='tight')
+        plt.savefig(out_file, dpi=300)
     if show:
         plt.show()
-    plt.close(fig)
 
 # Plot frequency response
 # param freqs: array of frequency bins (Hz)
@@ -296,7 +240,7 @@ def plot_agg_histogram(raw_all, bins, runs, odr, filt,
 
     # --- cosmetics --------------------------------------------------------
     ax.set_title(
-        f"{runs}-run Noise Floor Histogram\n@ ODR {odr/1e6:.1f} MHz – {filt}"
+        f"{runs}-run Noise Floor Histogram\n@ ODR {odr/1e6:.1f} MHz - {filt}"
     )
     ax.legend()
     plt.tight_layout()
@@ -330,7 +274,7 @@ def plot_agg_fft(freqs, mags, runs, odr, filt,
     ax.plot(freqs_plot, mags_db_plot, lw=0.8)
     ax.set_xlabel('Frequency [kHz]')
     ax.set_ylabel('Magnitude [dBV]')
-    ax.set_title(f"{runs}-run Noise Floor PSD @ {odr/1e6:.1f} MHz – {filt}")
+    ax.set_title(f"{runs}-run Noise Floor PSD @ {odr/1e6:.1f} MHz - {filt}")
 
     ax.grid(True, which='both', linestyle='--', linewidth=0.4)
 
