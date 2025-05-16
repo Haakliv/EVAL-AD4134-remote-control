@@ -1,16 +1,5 @@
 import numpy as np
-from scipy.signal import find_peaks
-
-# Compute the FFT magnitude spectrum of a real-valued signal.
-# param raw: 1D numpy array of time-domain samples
-# param fs: Sampling rate in Hz
-# return: freqs (Hz), spectrum (magnitude)
-def fft_spectrum(raw, fs):
-    N = raw.size
-    freqs = np.fft.rfftfreq(N, d=1.0/fs)
-    spectrum = np.abs(np.fft.rfft(raw))
-    return freqs, spectrum
-
+import scipy.signal
 
 # Calculate noise floor metrics: mean, standard deviation, and peak-to-peak.
 # param raw: 1D numpy array of voltage samples
@@ -157,19 +146,58 @@ def compute_mean_settling_time(
 
     return mean_delta, time_trunc, trace_trunc
 
-# Compute the -db_down dB bandwidth from a gain sweep.
-# param freqs: array of stimulus frequencies (Hz)
-# param gains: corresponding linear gains
-# param db_down: dB drop from reference gain (default 3 dB)
-# return: bandwidth frequency (Hz)
-def compute_bandwidth(freqs, gains, db_down=3):
-    ref_gain = gains[0]
-    cutoff_lin = ref_gain / (10 ** (db_down / 20))
-    for f, g in zip(freqs, gains):
-        if g <= cutoff_lin:
-            return f
-    return freqs[-1]
+def fft_spectrum(raw_data, sampling_freq):
+    """
+    Computes the single-sided FFT spectrum of raw_data using a Hann window.
+    Returns: frequencies, spectrum_magnitudes, window_correction_factor
+    """
+    N = raw_data.size
+    if N == 0:
+        return np.array([]), np.array([]), 1.0
 
+    hann_window = scipy.signal.windows.hann(N, sym=False)
+    raw_data_windowed = raw_data * hann_window
+    
+    sum_of_window_coeffs = np.sum(hann_window)
+    window_correction_factor = N / sum_of_window_coeffs if sum_of_window_coeffs != 0 else 1.0
+
+    spectrum_magnitudes = np.abs(np.fft.rfft(raw_data_windowed))
+    frequencies = np.fft.rfftfreq(N, d=1.0/sampling_freq)
+    
+    return frequencies, spectrum_magnitudes, window_correction_factor
+
+
+def compute_bandwidth(frequencies, gains):
+    # (Implementation from previous response - it's already quite concise)
+    if not isinstance(gains, (list, np.ndarray)) or len(gains) == 0:
+        return np.nan
+    
+    gains_array = np.array(gains)
+    valid_indices = ~np.isnan(gains_array)
+    if not np.any(valid_indices): return np.nan
+
+    valid_gains = gains_array[valid_indices]
+    valid_frequencies = np.array(frequencies)[valid_indices]
+
+    if len(valid_gains) < 2: return np.nan
+        
+    passband_gain_reference = np.max(valid_gains)
+    if passband_gain_reference <= 1e-9: return np.nan
+
+    cutoff_gain_value = passband_gain_reference / np.sqrt(2.0)
+    indices_below_cutoff = np.where(valid_gains < cutoff_gain_value)[0]
+
+    if not indices_below_cutoff.any(): return valid_frequencies[-1]
+    first_idx_below_cutoff = indices_below_cutoff[0]
+    if first_idx_below_cutoff == 0: return valid_frequencies[0]
+
+    g1, f1 = valid_gains[first_idx_below_cutoff - 1], valid_frequencies[first_idx_below_cutoff - 1]
+    g2, f2 = valid_gains[first_idx_below_cutoff], valid_frequencies[first_idx_below_cutoff]
+
+    if abs(g1 - g2) < 1e-9 : return f1 # Avoid division by zero if gains are flat
+    
+    interpolated_cutoff_freq = f1 + (f2 - f1) * (cutoff_gain_value - g1) / (g2 - g1)
+    return interpolated_cutoff_freq
 
 # Compute DC gain and offset errors from test data.
 # param applied: sequence of nominal voltages applied by SMU

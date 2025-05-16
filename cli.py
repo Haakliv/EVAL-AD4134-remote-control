@@ -315,52 +315,157 @@ def run_settling_time(args, logger, ace):
             show=args.show
         )
 
-# -- Frequency response -------------------------------------------------------
-def run_freq_response(args, logger, ace):
-    """AC gain and –3 dB bandwidth sweep with optional AWG subtraction."""
-    odr  = SLAVE_ODR_MAP[args.odr_code]
-    filt = SINC_FILTER_MAP[args.filter_code]
-    logger.info("Freq-response: %.1f-%.1f Hz (%d pts), %.2f Vpp, "
-                "offset=%.2f V, ODR=%.0f Hz, filter=%s",
-                args.freq_start, args.freq_stop, args.points,
-                args.amplitude, args.offset, odr, filt)
-
-    freqs  = np.linspace(args.freq_start, args.freq_stop, args.points)
-    gains  = []
-    gen    = WaveformGenerator(args.sdg_host)
-
-    # Pre-load baseline if requested
-    if args.awg_cal:
-        mag_awg_vec = load_awg_cal(args.awg_cal, freqs, odr)
-        logger.info("Using AWG baseline file %s", args.awg_cal)
+def run_freq_response(args, logger, ace): # ace object for ADC control
+    odr_hz = SLAVE_ODR_MAP[args.odr_code]
+    filter_name = SINC_FILTER_MAP[args.filter_code]
+    
+    if args.log_freq:
+        frequencies_to_test = np.logspace(np.log10(args.freq_start), np.log10(args.freq_stop), args.points)
+        sweep_type_msg = "logarithmic"
     else:
-        mag_awg_vec = None
+        frequencies_to_test = np.linspace(args.freq_start, args.freq_stop, args.points)
+        sweep_type_msg = "linear"
 
-    for i, f in enumerate(freqs):
-        gen.sine(args.channel, f, args.amplitude, args.offset)
-        raw = capture_samples(
-            ace, args.samples, ADC_LSB, args.odr_code, output_dir=os.getcwd()
-        )
-        f_bins, spectrum = fft_spectrum(raw, odr)
-        if mag_awg_vec is not None:
-            # interpolate AWG baseline onto current FFT bins then subtract
-            mag_awg_interp = np.interp(f_bins, freqs, mag_awg_vec)
-            spectrum = np.clip(spectrum - mag_awg_interp, 0, None)
+    logger.info(f"Freq-response ({sweep_type_msg}): {args.freq_start:.1f}–{args.freq_stop:.1f} Hz "
+                f"({args.points} pts), Vpp={args.amplitude:.2f}, Offset={args.offset:.2f}V, "
+                f"ODR={odr_hz:.0f}Hz, Filter={filter_name}, Window=Hann")
 
-        idx   = np.argmin(np.abs(f_bins - f))
-        gain  = (2.0 * spectrum[idx] / raw.size) / (args.amplitude / 2.0)
-        gains.append(gain)
-        gen.disable(args.channel)
+    if args.no_board:
+        logger.info("Running in --no-board mode. ADC interaction and analysis skipped.")
+    
+    measured_gains = []
+    
+    # Initialize Waveform Generator
+    wave_gen = None
+    if args.sdg_host:
+        try:
+            wave_gen = WaveformGenerator(args.sdg_host) # Using your provided class
+        except Exception as e:
+            logger.error(f"Failed to connect to Waveform Generator at {args.sdg_host}: {e}")
+            if not args.no_board: return
+    elif not args.no_board:
+        logger.error("SDG host not specified. Required unless using --no-board.")
+        return
 
-    cutoff = compute_bandwidth(freqs, gains)
-    logger.info("-3 dB bandwidth: %.2f Hz", cutoff)
+    # --- AWG Calibration Data Loading ---
+    awg_cal_data_loaded = None
+    if args.awg_cal:
+        try:
+            awg_cal_npz = np.load(args.awg_cal)
+            if 'freqs' not in awg_cal_npz or 'magnitudes' not in awg_cal_npz:
+                logger.error(f"AWG cal file {args.awg_cal} missing 'freqs' or 'magnitudes'. Proceeding without AWG cal.")
+            else:
+                awg_cal_data_loaded = {'freqs': awg_cal_npz['freqs'], 'magnitudes': awg_cal_npz['magnitudes']}
+                logger.info(f"Using AWG baseline file: {args.awg_cal}. "
+                            "IMPORTANT: Ensure cal file magnitudes were generated with matching FFT settings (N points, Hann window).")
+        except FileNotFoundError:
+            logger.error(f"AWG calibration file {args.awg_cal} not found. Proceeding without AWG cal.")
+        except Exception as e:
+            logger.error(f"Could not load/parse AWG cal file {args.awg_cal}: {e}. Proceeding without AWG cal.")
 
-    if args.plot or args.show:
-        plot_freq_response(
-            freqs, gains,
-            out_file=args.plot and f"freq_resp_{args.points}.png",
-            show=args.show
-        )
+    # Settling time
+    wavegen_settle_duration_s = getattr(args, 'wavegen_settle_time', 0.5) # Default 0.5s for AWG
+    adc_settle_fixed_s = 6.01e-6 # User-specified 6.01 µs ADC settling
+    
+    # Note: The 6.01µs is a fixed ADC settling. The Sinc6 digital filter settling is typically 6/ODR.
+    # If ODR is low (e.g., 1kHz, Sinc6 settle = 6ms), the 6.01µs might only cover AFE, not full digital filter.
+    # The script will use the 6.01µs as instructed.
+    digital_filter_theoretical_settle_s = 6.0 / odr_hz
+    if adc_settle_fixed_s < digital_filter_theoretical_settle_s and not args.no_board:
+        logger.warning(f"User-specified ADC settle time ({adc_settle_fixed_s*1e6:.2f}µs) is less than theoretical Sinc6 "
+                       f"filter settling time ({digital_filter_theoretical_settle_s*1e3:.2f}ms for ODR={odr_hz}Hz). "
+                       "Ensure this is intended.")
+
+    total_settle_duration_s = max(wavegen_settle_duration_s, adc_settle_fixed_s)
+    logger.info(f"Using effective per-point settle: {total_settle_duration_s*1e3:.3f}ms "
+                f"(Wavegen: {wavegen_settle_duration_s*1e3:.3f}ms, ADC (user-set): {adc_settle_fixed_s*1e6:.2f}µs)")
+
+
+    for i, current_freq_hz in enumerate(frequencies_to_test):
+        logger.info(f"Point {i+1}/{args.points}: Freq = {current_freq_hz:.2f} Hz")
+        if wave_gen:
+            wave_gen.sine(args.channel, current_freq_hz, args.amplitude, args.offset)
+        
+        time.sleep(total_settle_duration_s)
+
+        if args.no_board:
+            if wave_gen and i == 0 : wave_gen.disable(args.channel)
+            continue
+
+        if ace is None:
+             logger.error("ADC interface ('ace') is None. Cannot capture.")
+             break 
+
+        raw_adc_data = capture_samples(ace, args.samples, ADC_LSB, args.odr_code, output_dir=None)
+
+        if raw_adc_data is None or raw_adc_data.size == 0:
+            logger.warning(f"No data captured for {current_freq_hz:.2f} Hz. Appending NaN.")
+            measured_gains.append(np.nan)
+            if wave_gen: wave_gen.disable(args.channel)
+            continue
+            
+        fft_freq_bins, fft_spectrum_mags, window_correction_factor = fft_spectrum(raw_adc_data, odr_hz)
+        
+        # --- Apply AWG Calibration (if data loaded) ---
+        if awg_cal_data_loaded:
+            try:
+                # Interpolate AWG baseline magnitudes onto current FFT frequency bins
+                awg_correction_mags = np.interp(fft_freq_bins, 
+                                                awg_cal_data_loaded['freqs'], 
+                                                awg_cal_data_loaded['magnitudes'], 
+                                                left=0, right=0) # No extrapolation
+                fft_spectrum_mags = np.clip(fft_spectrum_mags - awg_correction_mags, 0, None)
+                logger.debug(f"  AWG calibration applied for {current_freq_hz:.2f} Hz.")
+            except Exception as e:
+                logger.warning(f"  Failed to apply AWG calibration for {current_freq_hz:.2f} Hz: {e}. Using uncalibrated spectrum for this point.")
+        
+        fft_peak_index = np.argmin(np.abs(fft_freq_bins - current_freq_hz))
+        output_voltage_peak = (fft_spectrum_mags[fft_peak_index] * 2.0 * window_correction_factor) / raw_adc_data.size
+        input_voltage_peak = args.amplitude / 2.0
+        
+        current_gain = np.nan
+        if abs(input_voltage_peak) > 1e-9:
+            current_gain = output_voltage_peak / input_voltage_peak
+        else:
+            logger.warning("Input amplitude peak is near zero, gain calculation unreliable.")
+            
+        measured_gains.append(current_gain)
+        logger.info(f"  Output Vpeak: {output_voltage_peak:7.4f} (Calibrated), Calculated Gain: {current_gain:7.4f}")
+
+        if wave_gen:
+            wave_gen.disable(args.channel)
+
+    if wave_gen:
+        wave_gen.disable(args.channel)
+
+    # --- Post-sweep Analysis and Plotting ---
+    if not args.no_board and measured_gains:
+        # Filter out any NaN values from gains for bandwidth calculation and plotting
+        valid_indices = ~np.isnan(measured_gains)
+        final_frequencies = np.array(frequencies_to_test)[valid_indices]
+        final_gains = np.array(measured_gains)[valid_indices]
+
+        if final_frequencies.size > 1: # Need at least 2 points for bandwidth
+            cutoff_frequency_hz = compute_bandwidth(final_frequencies, final_gains)
+            if not np.isnan(cutoff_frequency_hz):
+                logger.info(f"-3 dB bandwidth: {cutoff_frequency_hz:.2f} Hz (relative to max passband gain)")
+            else:
+                logger.warning("-3 dB bandwidth could not be determined from the collected data.")
+        else:
+            logger.warning("Not enough valid gain data points to compute bandwidth.")
+
+        # Plotting if requested and data is available
+        if (args.plot or args.show) and final_frequencies.size > 0:
+            plot_filename = None
+            if args.plot : # True or a string filename
+                plot_filename = args.plot if isinstance(args.plot, str) else f"freq_resp_{filter_name}_ODR{odr_hz}_pts{args.points}.png"
+            
+            # Ensure plot_freq_response can handle valid_frequencies and valid_gains
+            plot_freq_response(final_frequencies, final_gains, out_file=plot_filename, show=args.show)
+    elif args.no_board:
+        logger.info("Frequency sweep simulation (--no-board mode) completed.")
+    else: # Not --no-board, but measured_gains might be empty or all NaNs
+        logger.info("No valid gain data collected. Skipping bandwidth calculation and plotting.")
 
 # -- DC gain / offset ---------------------------------------------------------
 def run_dc_gain(args, logger, ace):
