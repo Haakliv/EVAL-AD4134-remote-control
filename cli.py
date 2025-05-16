@@ -9,6 +9,7 @@ import os
 import numpy as np
 import time
 from scipy.signal import welch
+import math
 
 # --- Project-local modules ---------------------------------------------------
 from ace_client import (
@@ -20,7 +21,7 @@ from ace_client import (
 )
 from generator   import WaveformGenerator
 from b2912a_source import B2912A
-from acquisition import capture_samples
+from acquisition import capture_samples, capture_samples_continuous
 from processing  import (
     fft_spectrum,
     compute_metrics,
@@ -300,7 +301,7 @@ def run_settling_time(args, logger, ace):
 
     # log mean pm95% CI and std (all converted to us)
     logger.info(
-        "Mean settling: %.2f µs ± %.2f µs (95%% CI), std=%.2f µs over %d runs",
+        "Mean settling: %.2f us +- %.2f us (95%% CI), std=%.2f us over %d runs",
         mean_ns*1e-3, ci95_ns*1e-3, std_ns*1e-3, arr.size
     )
 
@@ -315,157 +316,143 @@ def run_settling_time(args, logger, ace):
             show=args.show
         )
 
-def run_freq_response(args, logger, ace): # ace object for ADC control
+# -- Frequency response ------------------------------------------------------
+def run_freq_response(args, logger, ace):
+    # TODO: Fix length of runs not always matching, ensure all runs start at the trigger, make sure that it's the mean that is plotted, fix the calculation of the gain, clean up the code, find a way to make measurements quicker?
     odr_hz = SLAVE_ODR_MAP[args.odr_code]
     filter_name = SINC_FILTER_MAP[args.filter_code]
-    
-    if args.log_freq:
-        frequencies_to_test = np.logspace(np.log10(args.freq_start), np.log10(args.freq_stop), args.points)
-        sweep_type_msg = "logarithmic"
-    else:
-        frequencies_to_test = np.linspace(args.freq_start, args.freq_stop, args.points)
-        sweep_type_msg = "linear"
 
-    logger.info(f"Freq-response ({sweep_type_msg}): {args.freq_start:.1f}–{args.freq_stop:.1f} Hz "
-                f"({args.points} pts), Vpp={args.amplitude:.2f}, Offset={args.offset:.2f}V, "
-                f"ODR={odr_hz:.0f}Hz, Filter={filter_name}, Window=Hann")
+    # warn on ADC vs Sinc6 settle
+    adc_settle = 6.01e-6
+    sinc6_settle = 6.0 / odr_hz
+    if adc_settle < sinc6_settle and not args.no_board:
+        logger.warning(
+            "User-set ADC settle (%.2fus) < theoretical Sinc6 settle (%.2fus)" %
+            (adc_settle * 1e6, sinc6_settle * 1e6)
+        )
 
-    if args.no_board:
-        logger.info("Running in --no-board mode. ADC interaction and analysis skipped.")
-    
-    measured_gains = []
-    
-    # Initialize Waveform Generator
+    # pre-capture settle
+    wavegen_settle = getattr(args, "wavegen_settle_time", 0.5)
+    pre_capture_settle = max(wavegen_settle, adc_settle)
+
+    total_samples = int(args.sweep_time * odr_hz)
+    segments = math.ceil(total_samples / SAMPLES_DEFAULT)
+    samples_per_segment = SAMPLES_DEFAULT
+
+    logger.info(
+        "Continuous-chirp Freq-response: %.1f-%.1f Hz, Runs=%d, Segments=%d, "
+        "Samples/seg=%d, Vpp=%.2f, Offset=%.2fV, ODR=%.0fkHz, Filter=%s",
+        args.freq_start, args.freq_stop, args.runs, segments,
+        samples_per_segment, args.amplitude, args.offset, odr_hz / 1e3, filter_name
+    )
+
+    # init AWG
     wave_gen = None
     if args.sdg_host:
-        try:
-            wave_gen = WaveformGenerator(args.sdg_host) # Using your provided class
-        except Exception as e:
-            logger.error(f"Failed to connect to Waveform Generator at {args.sdg_host}: {e}")
-            if not args.no_board: return
+        wave_gen = WaveformGenerator(args.sdg_host)
+        wave_gen.sweep_diff(
+            start_hz=args.freq_start,
+            stop_hz=args.freq_stop,
+            sweep_time_s=args.sweep_time,
+            linear=not args.log_freq,
+            amplitude=args.amplitude,
+            offset=args.offset
+        )
+        wave_gen.sdg.enable_output(1)
+        wave_gen.sdg.enable_output(2)
     elif not args.no_board:
-        logger.error("SDG host not specified. Required unless using --no-board.")
+        logger.error("SDG host required unless --no-board.")
         return
 
-    # --- AWG Calibration Data Loading ---
-    awg_cal_data_loaded = None
-    if args.awg_cal:
-        try:
-            awg_cal_npz = np.load(args.awg_cal)
-            if 'freqs' not in awg_cal_npz or 'magnitudes' not in awg_cal_npz:
-                logger.error(f"AWG cal file {args.awg_cal} missing 'freqs' or 'magnitudes'. Proceeding without AWG cal.")
-            else:
-                awg_cal_data_loaded = {'freqs': awg_cal_npz['freqs'], 'magnitudes': awg_cal_npz['magnitudes']}
-                logger.info(f"Using AWG baseline file: {args.awg_cal}. "
-                            "IMPORTANT: Ensure cal file magnitudes were generated with matching FFT settings (N points, Hann window).")
-        except FileNotFoundError:
-            logger.error(f"AWG calibration file {args.awg_cal} not found. Proceeding without AWG cal.")
-        except Exception as e:
-            logger.error(f"Could not load/parse AWG cal file {args.awg_cal}: {e}. Proceeding without AWG cal.")
+    if not args.no_board and ace is None:
+        logger.error("ACE client is required for hardware capture.")
+        return
 
-    # Settling time
-    wavegen_settle_duration_s = getattr(args, 'wavegen_settle_time', 0.5) # Default 0.5s for AWG
-    adc_settle_fixed_s = 6.01e-6 # User-specified 6.01 µs ADC settling
-    
-    # Note: The 6.01µs is a fixed ADC settling. The Sinc6 digital filter settling is typically 6/ODR.
-    # If ODR is low (e.g., 1kHz, Sinc6 settle = 6ms), the 6.01µs might only cover AFE, not full digital filter.
-    # The script will use the 6.01µs as instructed.
-    digital_filter_theoretical_settle_s = 6.0 / odr_hz
-    if adc_settle_fixed_s < digital_filter_theoretical_settle_s and not args.no_board:
-        logger.warning(f"User-specified ADC settle time ({adc_settle_fixed_s*1e6:.2f}µs) is less than theoretical Sinc6 "
-                       f"filter settling time ({digital_filter_theoretical_settle_s*1e3:.2f}ms for ODR={odr_hz}Hz). "
-                       "Ensure this is intended.")
+    measured_spectra = []
+    try:
+        for run in range(1, args.runs + 1):
+            logger.info(
+                "Run %d/%d: waiting %.3f s to settle...",
+                run, args.runs, pre_capture_settle
+            )
+            time.sleep(pre_capture_settle)
 
-    total_settle_duration_s = max(wavegen_settle_duration_s, adc_settle_fixed_s)
-    logger.info(f"Using effective per-point settle: {total_settle_duration_s*1e3:.3f}ms "
-                f"(Wavegen: {wavegen_settle_duration_s*1e3:.3f}ms, ADC (user-set): {adc_settle_fixed_s*1e6:.2f}µs)")
+            if args.no_board:
+                logger.info(
+                    "--no-board: triggering AWG and sleeping for %.3f s",
+                    args.sweep_time
+                )
+                wave_gen.trigger()
+                time.sleep(args.sweep_time)
+                break
+
+            logger.info(
+                "Triggering AWG, capturing %d segments of %d samples each...",
+                segments, samples_per_segment
+            )
+            wave_gen.trigger()
+            t0 = time.time()
+
+            raw = capture_samples_continuous(
+                ace_client=ace,
+                sweep_time=args.sweep_time,
+                samples_per_segment=SAMPLES_DEFAULT,
+                scale=ADC_LSB,
+                odr_code=args.odr_code,
+                timeout_ms=int(SAMPLES_DEFAULT / odr_hz * 1000 + 2000),
+                output_dir=os.getcwd(),
+                run_idx=run
+            )
 
 
-    for i, current_freq_hz in enumerate(frequencies_to_test):
-        logger.info(f"Point {i+1}/{args.points}: Freq = {current_freq_hz:.2f} Hz")
+            dt = time.time() - t0
+            logger.info(
+                "Captured %.2f s (%.0f samples) starting at %s",
+                dt, raw.size, time.strftime("%H:%M:%S", time.localtime(t0))
+            )
+
+            if raw.size == 0:
+                logger.warning("Run %d: no data captured", run)
+                continue
+
+            freqs, mags, corr = fft_spectrum(raw, odr_hz)
+            measured_spectra.append((freqs, mags, corr, raw.size))
+
+    finally:
         if wave_gen:
-            wave_gen.sine(args.channel, current_freq_hz, args.amplitude, args.offset)
-        
-        time.sleep(total_settle_duration_s)
+            logger.info("Disabling AWG outputs")
+            wave_gen.sdg.interface.write("C1:OUTP OFF")
+            wave_gen.sdg.interface.write("C2:OUTP OFF")
 
-        if args.no_board:
-            if wave_gen and i == 0 : wave_gen.disable(args.channel)
-            continue
+    if not measured_spectra:
+        logger.error("No valid sweep runs - aborting analysis")
+        return
 
-        if ace is None:
-             logger.error("ADC interface ('ace') is None. Cannot capture.")
-             break 
+    # average spectra
+    fft_freqs = measured_spectra[0][0]
+    acc_mags = np.zeros_like(fft_freqs)
+    corr = measured_spectra[0][2]
+    Npts = measured_spectra[0][3]
+    for _, mags, _, _ in measured_spectra:
+        acc_mags += mags
+    avg_mags = acc_mags / len(measured_spectra)
 
-        raw_adc_data = capture_samples(ace, args.samples, ADC_LSB, args.odr_code, output_dir=None)
+    # convert to gain
+    input_peak = args.amplitude / 2.0
+    gains = (2.0 * avg_mags * corr / Npts) / input_peak
 
-        if raw_adc_data is None or raw_adc_data.size == 0:
-            logger.warning(f"No data captured for {current_freq_hz:.2f} Hz. Appending NaN.")
-            measured_gains.append(np.nan)
-            if wave_gen: wave_gen.disable(args.channel)
-            continue
-            
-        fft_freq_bins, fft_spectrum_mags, window_correction_factor = fft_spectrum(raw_adc_data, odr_hz)
-        
-        # --- Apply AWG Calibration (if data loaded) ---
-        if awg_cal_data_loaded:
-            try:
-                # Interpolate AWG baseline magnitudes onto current FFT frequency bins
-                awg_correction_mags = np.interp(fft_freq_bins, 
-                                                awg_cal_data_loaded['freqs'], 
-                                                awg_cal_data_loaded['magnitudes'], 
-                                                left=0, right=0) # No extrapolation
-                fft_spectrum_mags = np.clip(fft_spectrum_mags - awg_correction_mags, 0, None)
-                logger.debug(f"  AWG calibration applied for {current_freq_hz:.2f} Hz.")
-            except Exception as e:
-                logger.warning(f"  Failed to apply AWG calibration for {current_freq_hz:.2f} Hz: {e}. Using uncalibrated spectrum for this point.")
-        
-        fft_peak_index = np.argmin(np.abs(fft_freq_bins - current_freq_hz))
-        output_voltage_peak = (fft_spectrum_mags[fft_peak_index] * 2.0 * window_correction_factor) / raw_adc_data.size
-        input_voltage_peak = args.amplitude / 2.0
-        
-        current_gain = np.nan
-        if abs(input_voltage_peak) > 1e-9:
-            current_gain = output_voltage_peak / input_voltage_peak
-        else:
-            logger.warning("Input amplitude peak is near zero, gain calculation unreliable.")
-            
-        measured_gains.append(current_gain)
-        logger.info(f"  Output Vpeak: {output_voltage_peak:7.4f} (Calibrated), Calculated Gain: {current_gain:7.4f}")
+    # compute −3 dB cutoff
+    cutoff = compute_bandwidth(fft_freqs, gains)
+    logger.info("-3 dB bandwidth: %.2f Hz", cutoff)
 
-        if wave_gen:
-            wave_gen.disable(args.channel)
+    if args.plot or args.show:
+        plot_freq_response(
+            fft_freqs,
+            gains,
+            out_file=args.plot if isinstance(args.plot, str) else f"chirp_{args.runs}runs.png",
+            show=args.show
+        )
 
-    if wave_gen:
-        wave_gen.disable(args.channel)
-
-    # --- Post-sweep Analysis and Plotting ---
-    if not args.no_board and measured_gains:
-        # Filter out any NaN values from gains for bandwidth calculation and plotting
-        valid_indices = ~np.isnan(measured_gains)
-        final_frequencies = np.array(frequencies_to_test)[valid_indices]
-        final_gains = np.array(measured_gains)[valid_indices]
-
-        if final_frequencies.size > 1: # Need at least 2 points for bandwidth
-            cutoff_frequency_hz = compute_bandwidth(final_frequencies, final_gains)
-            if not np.isnan(cutoff_frequency_hz):
-                logger.info(f"-3 dB bandwidth: {cutoff_frequency_hz:.2f} Hz (relative to max passband gain)")
-            else:
-                logger.warning("-3 dB bandwidth could not be determined from the collected data.")
-        else:
-            logger.warning("Not enough valid gain data points to compute bandwidth.")
-
-        # Plotting if requested and data is available
-        if (args.plot or args.show) and final_frequencies.size > 0:
-            plot_filename = None
-            if args.plot : # True or a string filename
-                plot_filename = args.plot if isinstance(args.plot, str) else f"freq_resp_{filter_name}_ODR{odr_hz}_pts{args.points}.png"
-            
-            # Ensure plot_freq_response can handle valid_frequencies and valid_gains
-            plot_freq_response(final_frequencies, final_gains, out_file=plot_filename, show=args.show)
-    elif args.no_board:
-        logger.info("Frequency sweep simulation (--no-board mode) completed.")
-    else: # Not --no-board, but measured_gains might be empty or all NaNs
-        logger.info("No valid gain data collected. Skipping bandwidth calculation and plotting.")
 
 # -- DC gain / offset ---------------------------------------------------------
 def run_dc_gain(args, logger, ace):
@@ -575,21 +562,25 @@ def setup_parsers():
     add_common_plot_args(st)
 
     # --- Frequency-response --------------------------------------------------
-    fr = subs.add_parser('freq-response', help='Freq-response gain sweep')
+    fr = subs.add_parser('freq-response', help='Continuous-chirp freq-response gain sweep')
     fr.add_argument('--sdg-host', dest='sdg_host', type=str,
                     default=SDG_HOST_DEFAULT, help='SDG address')
     fr.add_argument('--channel', type=int, choices=[1, 2], default=1,
-                    help='SDG channel')
-    fr.add_argument('--freq-start', dest='freq_start', type=float,
-                    default=10.0, help='start [Hz]')
-    fr.add_argument('--freq-stop', dest='freq_stop', type=float,
-                    default=10_000.0, help='stop [Hz]')
-    fr.add_argument('--points', type=int, default=SWEEP_POINTS_DEFAULT,
-                    help='sweep points')
-    fr.add_argument('--amplitude', type=float, default=1.0, help='Vpp')
-    fr.add_argument('--offset', type=float, default=0.0, help='offset [V]')
-    fr.add_argument('--awg-cal', type=str,
-                    help='NPZ file with AWG baseline PSD')
+                    help='AWG channel')
+    fr.add_argument('--freq-start', dest='freq_start', type=float, default=10.0,
+                    help='Sweep start frequency [Hz]')
+    fr.add_argument('--freq-stop', dest='freq_stop', type=float, default=650000.0,
+                    help='Sweep stop frequency [Hz]')
+    fr.add_argument('--sweep-time', dest='sweep_time', type=float, default=10.0,
+                    help='Total sweep duration [s]')
+    fr.add_argument('--log-freq', dest='log_freq', action='store_true',
+                    help='Use logarithmic sweep (default is linear)')
+    fr.add_argument('--amplitude', dest='amplitude', type=float, default=1.0,
+                    help='Differential Vpp of the sine sweep')
+    fr.add_argument('--offset', dest='offset', type=float, default=0.0,
+                    help='Common-mode DC offset [V]')
+    fr.add_argument('--no-board', dest='no_board', action='store_true',
+                    help='Dry-run: skip ADC capture')
     add_common_adc_args(fr)
     add_common_plot_args(fr)
 

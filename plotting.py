@@ -93,7 +93,7 @@ def plot_settling_time(
     :param out_file:   filename to save the figure (PNG)
     :param show:       if True, display the plot interactively
     """
-    pad = 2  # two samples before and after
+    pad = 10  # two samples before and after
 
     plt.figure(figsize=(10, 6))
 

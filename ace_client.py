@@ -3,6 +3,7 @@ import sys
 import time
 import socket
 import datetime
+import glob
 
 # Add ACE Remote Control client library path
 sys.path.append(r"C:\Program Files (x86)\Analog Devices\ACE\Client")
@@ -123,35 +124,32 @@ class ACEClient:
         self.client.Run('Evaluation.Control.SetIntParameter("virtual-parameter-data-format",2,-1)')
         self.client.Run('Evaluation.Control.SetIntParameter("virtual-parameter-data-frame",2,-1)')
         self.client.Run('@ApplySettings()')
-        time.sleep(1)
+
+    def setup_capture(self, sample_count: int = 131072, odr_code: int = 12):
+        # Set sample count and ODR
+        self.client.set_ContextPath(CTX_DRIVER)
+        self.client.NavigateToPath(UI_DRIVER)
+        self.client.Run(
+            f'Evaluation.Control.SetIntParameter("virtual-parameter-sample-count",{sample_count},-1)'
+        )
+        self.client.Run(
+            f'Evaluation.Control.SetIntParameter("virtual-parameter-slave-odr",{odr_code},-1)'
+        )
 
     # Perform an asynchronous raw data capture to a binary file.
     # param sample_count: number of samples to capture
     # param odr_code: desired output data rate in Hz
     # param timeout_ms: timeout in milliseconds
     # return: path to the binary output file
-    def capture(self, sample_count, odr_code: int, timeout_ms=10000):
-        print(f"Capturing {sample_count} samples at ODR {SLAVE_ODR_MAP[odr_code]}")
-        # Return to driver page for capture
-        self.client.set_ContextPath(CTX_DRIVER)
-        self.client.NavigateToPath(UI_DRIVER)
-
+    def capture(self, sample_count, timeout_ms=10000):
         # Create output folder & filename
         folder = _measurement_folder()
         bin_path = os.path.join(folder, f"raw_{sample_count}.bin")
 
-        self.client.Run(
-            f'Evaluation.Control.SetIntParameter("virtual-parameter-slave-odr",{odr_code},-1)'
-        )
-
-        # Set sample count and trigger capture
-        self.client.Run(
-            f'Evaluation.Control.SetIntParameter("virtual-parameter-sample-count",{sample_count},-1)'
-        )
-        time.sleep(0.1)
         self.client.AsyncRawCaptureToFile(bin_path, 'capture', 'false', 'true')
         self.client.WaitOnRawCaptureToFile(
             str(timeout_ms), 'capture', 'false', bin_path
         )
 
         return bin_path
+    

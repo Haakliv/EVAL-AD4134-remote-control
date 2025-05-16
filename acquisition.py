@@ -1,5 +1,5 @@
 import numpy as np
-from ace_client import ADC_RES_BITS, MAX_INPUT_RANGE
+from ace_client import ADC_RES_BITS, MAX_INPUT_RANGE, SLAVE_ODR_MAP
 import os
 import time
 import shutil
@@ -58,8 +58,7 @@ def capture_samples(
     output_dir: str = None,
 ) -> np.ndarray:
     ace = ace_client
-    # Perform capture; ACEClient.capture creates a timestamped folder
-    bin_path = ace.capture(sample_count, odr_code, timeout_ms)
+    bin_path = ace.capture(sample_count, timeout_ms)
     capture_samples.last_bin_path = bin_path
 
     # Move all capture artifacts into output_dir
@@ -82,3 +81,68 @@ def capture_samples(
 
 # Initialize attribute so callers can always access the last .bin path
 capture_samples.last_bin_path = None
+
+def capture_samples_continuous(
+    ace_client,
+    sweep_time: float,
+    scale: float = ADC_SCALE,
+    odr_code: int = 12,
+    samples_per_segment: int = 131072,
+    timeout_ms: int = 10000,
+    output_dir: str = None,
+    run_idx: int = 1,
+) -> np.ndarray:
+    """
+    Capture repeated segments using ace.capture() until sweep_time has elapsed.
+    Each run's files are stored in a unique subfolder: .../run_01/, .../run_02/, etc.
+    Returns the voltage samples as a single array (trimmed to sweep_time).
+    """
+    ace = ace_client
+    odr_hz = SLAVE_ODR_MAP[odr_code]
+    t_start = time.time()
+    all_segments = []
+
+    main_folder = output_dir
+
+    run_folder = os.path.join(main_folder, f"run_{run_idx:02d}")
+    os.makedirs(run_folder, exist_ok=True)
+
+    # Setup once for efficiency
+    ace.setup_capture(samples_per_segment, odr_code)
+
+    # Segment acquisition loop (run until sweep_time is up)
+    while True:
+        elapsed = time.time() - t_start
+        if elapsed >= sweep_time:
+            break
+
+        # Capture segment
+        bin_path = ace.capture(samples_per_segment, timeout_ms)
+        capture_samples_continuous.last_bin_path = bin_path
+
+        # Move files into run subfolder
+        folder = os.path.dirname(bin_path)
+        prefix = os.path.basename(folder)
+        for fname in os.listdir(folder):
+            src = os.path.join(folder, fname)
+            dst = os.path.join(run_folder, f"{prefix}_{fname}")
+            shutil.move(src, dst)
+        try:
+            os.rmdir(folder)
+        except OSError:
+            pass
+        segment_file = os.path.join(run_folder, f"{prefix}_{os.path.basename(bin_path)}")
+
+        # Decode segment and store
+        samples = read_raw_samples(segment_file, scale)
+        all_segments.append(samples)
+
+    # Concatenate and trim to exact sweep duration
+    all_samples = np.concatenate(all_segments)
+    n_target = int(sweep_time * odr_hz)
+    if all_samples.size > n_target:
+        all_samples = all_samples[:n_target]
+
+    return all_samples
+
+capture_samples_continuous.last_bin_path = None
