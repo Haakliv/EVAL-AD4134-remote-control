@@ -180,7 +180,7 @@ def compute_bandwidth(frequencies: np.ndarray,
                       db: bool = False
                      ) -> float:
     """
-    Find the –3 dB cutoff of a gain sweep.
+    Find the -3 dB cutoff of a gain sweep.
     If db=True, gains are in dB; else linear.
     Returns cutoff frequency in Hz.
     """

@@ -125,58 +125,53 @@ class WaveformGenerator:
         self.sdg.enable_output(ch_neg)
 
     def sweep_diff(self,
-                   start_hz: float,
-                   stop_hz: float,
-                   sweep_time_s: float,
-                   linear: bool = True,
-                   amplitude: float = 1.0,
-                   offset: float = 0.0,
-                   ch_pos: int = 1,
-                   ch_neg: int = 2):
+                start_hz: float,
+                stop_hz: float,
+                sweep_time_s: float,
+                linear: bool = True,
+                amplitude: float = 1.0,
+                offset: float = 0.0,
+                ch_pos: int = 1,
+                ch_neg: int = 2):
         """
-        Differential sine sweep on ch_pos/ch_neg from start_hz to stop_hz
-        over sweep_time_s seconds, using the built-in SWWV mode.
-        Configured for MANual trigger: no sweep until .trigger() is called.
-        At end-of-sweep the SDG will emit a TTL pulse on its TRMD line.
+        Corrected Differential sine sweep on ch_pos/ch_neg from start_hz to stop_hz
+        over sweep_time_s seconds, using SWWV mode.
         """
-        # 1) Clamp common-mode offset
-        max_cm = MAX_INPUT_RANGE
-        if abs(offset) > max_cm:
-            offset = max_cm if offset > 0 else -max_cm
 
-        # 2) Headroom check
+        max_cm = MAX_INPUT_RANGE
+        offset = max(min(offset, max_cm), -max_cm)
+
         safe_vpp = limit_vpp_offset(amplitude, offset)
         if safe_vpp <= 0:
-            raise ValueError(
-                f"Offset={offset} V leaves no headroom for Vpp={amplitude} V"
-            )
+            raise ValueError(f"Offset={offset} V leaves no headroom for Vpp={amplitude} V")
+        
+        safe_vpp = safe_vpp / 4.0
 
-        # 3) Configure each channel for a manual‐triggered sweep
         mode = "LINE" if linear else "LOG"
         for ch in (ch_pos, ch_neg):
-            # basic sine setup
             self.sdg.set_waveform('SINE', ch)
             self.sdg.set_frequency(start_hz, ch)
             self.sdg.set_amplitude(safe_vpp, ch)
             self.sdg.set_offset(offset, ch)
             self.sdg.set_output_load('50', ch)
 
-            # arm sweep mode
             self.sdg.interface.write(f"C{ch}:SweepWaVe STATE,ON")
-            # set trigger source to Manual
             self.sdg.interface.write(f"C{ch}:SweepWaVe TRSR,MAN")
-            # program sweep parameters
             self.sdg.interface.write(f"C{ch}:SweepWaVe START,{start_hz}")
             self.sdg.interface.write(f"C{ch}:SweepWaVe STOP,{stop_hz}")
             self.sdg.interface.write(f"C{ch}:SweepWaVe TIME,{sweep_time_s}")
             self.sdg.interface.write(f"C{ch}:SweepWaVe SWMD,{mode}")
 
-            # 4) enable trigger-out at end of sweep and set edge
-            self.sdg.interface.write(f"C{ch}:SweepWaVe TRMD,ON")    # enable trigger-out :contentReference[oaicite:0]{index=0}:contentReference[oaicite:1]{index=1}
-            self.sdg.interface.write(f"C{ch}:SweepWaVe EDGE,RISE")  # send rising-edge pulse :contentReference[oaicite:2]{index=2}:contentReference[oaicite:3]{index=3}
+            self.sdg.interface.write(f"C{ch}:SweepWaVe TRMD,ON")
+            self.sdg.interface.write(f"C{ch}:SweepWaVe EDGE,RISE")
 
-        # 5) Invert the negative leg by 180°
-        self.sdg.set_phase(180.0, ch_neg)
+        # Explicitly set differential phase
+        self.sdg.interface.write(f"C{ch_pos}:SWWV CARR,PHSE,0")
+        self.sdg.interface.write(f"C{ch_neg}:SWWV CARR,PHSE,0")
+
+        # Simultaneous trigger
+        self.sdg.interface.write(f"C{ch_pos}:SWWV MTRIG; C{ch_neg}:SWWV MTRIG")
+
 
     def trigger(self, ch_pos: int = 1, ch_neg: int = 2):
         """

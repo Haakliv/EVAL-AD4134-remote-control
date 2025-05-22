@@ -68,13 +68,13 @@ def add_common_adc_args(parser):
                         default=ACE_HOST_DEFAULT, help='ACE server address')
     parser.add_argument('--odr-code', type=int, choices=list(SLAVE_ODR_MAP.keys()),
                         default=ADC_ODR_CODE_DEFAULT,
-                        help=('ADC ODR code (0–13): ' +
+                        help=('ADC ODR code (0-13): ' +
                               ', '.join(f"{c}={r:.0f} Hz"
                                         for c, r in SLAVE_ODR_MAP.items())))
     parser.add_argument('--filter-code', type=int,
                         choices=list(SINC_FILTER_MAP.keys()),
                         default=ADC_FILTER_CODE_DEFAULT,
-                        help=('ADC filter code (0–4): ' +
+                        help=('ADC filter code (0-4): ' +
                               ', '.join(f"{c}={name}"
                                         for c, name in SINC_FILTER_MAP.items())))
     parser.add_argument('-n', '--samples', type=int, default=SAMPLES_DEFAULT,
@@ -315,10 +315,10 @@ def run_settling_time(args, logger, ace):
             out_file=plot_file,
             show=args.show
         )
+# TODO: Wavegen is not differential, fix the calculation of the gain, clean up the code, find a way to make measurements quicker?
 
 # -- Frequency response ------------------------------------------------------
 def run_freq_response(args, logger, ace):
-    # TODO: Fix length of runs not always matching, ensure all runs start at the trigger, make sure that it's the mean that is plotted, fix the calculation of the gain, clean up the code, find a way to make measurements quicker?
     odr_hz = SLAVE_ODR_MAP[args.odr_code]
     filter_name = SINC_FILTER_MAP[args.filter_code]
 
@@ -429,6 +429,17 @@ def run_freq_response(args, logger, ace):
         return
 
     # average spectra
+    # Truncate all spectra to the shortest length
+    min_len = min(spectrum[1].shape[0] for spectrum in measured_spectra)
+    if any(spectrum[1].shape[0] != min_len for spectrum in measured_spectra):
+        logger.warning(f"Spectra lengths differ, truncating all to {min_len} samples.")
+
+    # Truncate each spectrum
+    measured_spectra = [
+        (freqs[:min_len], mags[:min_len], corr, Npts)
+        for freqs, mags, corr, Npts in measured_spectra
+    ]
+
     fft_freqs = measured_spectra[0][0]
     acc_mags = np.zeros_like(fft_freqs)
     corr = measured_spectra[0][2]
