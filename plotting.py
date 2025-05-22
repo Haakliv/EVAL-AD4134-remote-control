@@ -114,6 +114,8 @@ def plot_settling_time(
     plt.axvline(0, linestyle=':', label='Mean start', linewidth=2)
     plt.axvline(mean_delta, linestyle='--', label='Mean end', linewidth=2)
     plt.axvspan(0, mean_delta, alpha=0.2, label='Mean window')
+    xmin, xmax = t_mean[0], t_mean[-1]
+    plt.xlim(xmin, xmax)
 
     # labels & ticks
     plt.xlabel('Time relative to edge (µs)')

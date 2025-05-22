@@ -53,7 +53,6 @@ def capture_samples(
     ace_client,
     sample_count: int = 131072,
     scale: float = ADC_SCALE,
-    odr_code: int = 12,
     timeout_ms: int = 10000,
     output_dir: str = None,
 ) -> np.ndarray:

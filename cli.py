@@ -21,13 +21,12 @@ from ace_client import (
 )
 from generator   import WaveformGenerator
 from b2912a_source import B2912A
-from acquisition import capture_samples, capture_samples_continuous
+from acquisition import capture_samples
 from processing  import (
     fft_spectrum,
     compute_metrics,
     compute_settling_time,
     compute_mean_settling_time,
-    compute_bandwidth,
     compute_dc_gain_offset,
     find_spur_rms,
 )
@@ -107,6 +106,7 @@ def load_awg_cal(cal_path, target_freqs, odr_rate):
 # -- Noise floor --------------------------------------------------------------
 def run_noise_floor(args, logger, ace):
     """Aggregate-statistics noise-floor measurement."""
+    ace.setup_capture(args.samples, args.odr_code)
     odr     = SLAVE_ODR_MAP[args.odr_code]
     filt    = SINC_FILTER_MAP[args.filter_code]
     logger.info("Noise-floor: runs=%d, ODR=%.0f Hz, filter=%s",
@@ -170,7 +170,7 @@ def run_gen_spectrum(args, logger, ace):
     odr = SLAVE_ODR_MAP[args.odr_code]
     gen = WaveformGenerator(args.sdg_host)
     fs_vpp = MAX_INPUT_RANGE * 10 ** (-0.5 / 20)
-    logger.info("Using %.6f Vpp (–0.5 dBFS) instead of %.6f Vpp", fs_vpp, args.amplitude)
+    logger.info("Using %.6f Vpp (-0.5 dBFS) instead of %.6f Vpp", fs_vpp, args.amplitude)
     gen.sine(args.channel, args.freq, fs_vpp, args.offset)
     logger.info("Capturing AWG baseline PSD: f=%.2f Hz, %.2f Vpp, offset=%.2f V",
                 args.freq, args.amplitude, args.offset)
@@ -236,19 +236,19 @@ def run_settling_time(args, logger, ace):
     filt       = SINC_FILTER_MAP[args.filter_code]
     Ts_us      = 1e6 / odr
 
-    # ±1 LSB_eff band  (≈60µV @1.25MSPS)
-    LSB_eff_uV = 2 * MAX_INPUT_RANGE / 2**17.3 # ≈60µV at 17.3 ENOB
+    # +-1 LSB_eff band  (approx 60uV @1.25MSPS, 17.3 ENOB)
+    LSB_eff_uV = 2 * MAX_INPUT_RANGE / 2**17.3
 
     logger.info("Settling test: ODR=%.0fHz, %s, runs=%d, Vpp=%.2f, freq=%.1fHz",
                 odr, filt, args.runs, args.amplitude, args.frequency)
 
-    # ----- configure AWG -----
+    ace.setup_capture(args.samples, args.odr_code)
+
     gen = WaveformGenerator(args.sdg_host, "PULSE", args.offset)
     gen.pulse_diff(args.frequency, args.amplitude,
                    low_pct=50.0, edge_time=2e-9)
     time.sleep(0.5)
 
-    # ----- capture & compute -----
     raw_runs     = []
     start_idxs   = []
     end_idxs     = []
@@ -258,7 +258,7 @@ def run_settling_time(args, logger, ace):
 
     for run in range(1, args.runs + 1):
         raw = capture_samples(
-            ace, args.samples, ADC_LSB, args.odr_code,
+            ace, args.samples, ADC_LSB,
             output_dir=os.getcwd()
         )
         raw_runs.append(raw)
@@ -287,19 +287,18 @@ def run_settling_time(args, logger, ace):
     gen.disable(1)
     gen.disable(2)
 
-    # ----- mean-settling summary & logging -----
     if not start_idxs or not end_idxs:
         logger.error("No valid measurements obtained")
         return
 
     # compute and log the mean settling across all runs
     mean_delta, time_vec, mean_seg = compute_mean_settling_time(raw_runs, start_idxs, end_idxs, Ts_us, pad=2)
-    arr    = np.array(times_ns)                # in nanoseconds
+    arr    = np.array(times_ns)
     mean_ns = arr.mean()
     std_ns  = arr.std(ddof=1) if arr.size > 1 else 0.0
     ci95_ns = 1.96 * std_ns / np.sqrt(arr.size) if arr.size > 1 else 0.0
 
-    # log mean pm95% CI and std (all converted to us)
+    # log mean pm95% CI and std in us
     logger.info(
         "Mean settling: %.2f us +- %.2f us (95%% CI), std=%.2f us over %d runs",
         mean_ns*1e-3, ci95_ns*1e-3, std_ns*1e-3, arr.size
@@ -315,7 +314,6 @@ def run_settling_time(args, logger, ace):
             out_file=plot_file,
             show=args.show
         )
-# TODO: Wavegen is not differential, fix the calculation of the gain, clean up the code, find a way to make measurements quicker?
 
 def measure_tone(
         args,
@@ -331,19 +329,16 @@ def measure_tone(
         ch_pos: int = 1,
         ch_neg: int = 2,
 ):
-    # 1) Program the generator
     wave_gen.sine_diff(freq_hz, amplitude, offset,
                        ch_pos=ch_pos, ch_neg=ch_neg)
 
-    # 2) Wait for the DAC and ADC to settle
     time.sleep(settle_cycles / freq_hz)
 
-    # 3) Work out how many samples the requested capture would need
     samples = int(odr_hz * capture_cycles / freq_hz)
     logger.info(f"Capture @ {freq_hz:.1f} Hz = {samples} samples")
 
     if samples > SAMPLES_DEFAULT:
-        # shrink capture_cycles so we still fit in one shot
+        # Shrink capture_cycles so it fits in one shot
         new_capture_cycles = int(SAMPLES_DEFAULT * freq_hz / odr_hz)
         logger.warning(
             "tone %.1f Hz: %d samples would exceed buffer; "
@@ -353,25 +348,19 @@ def measure_tone(
         capture_cycles = new_capture_cycles
         samples = SAMPLES_DEFAULT
 
-    # 4) One-shot capture -> numpy array
     raw = capture_samples(
         ace_client=ace_client,
         sample_count=samples,
-        odr_code=args.odr_code,     # pass through whatever you parsed
-        output_dir=os.getcwd()             # or a folder if you like
+        output_dir=os.getcwd()
     )
 
-    # 5) Vrms
     vrms = float(np.sqrt(np.mean(raw.astype(np.float64) ** 2)))
-
-    # 6) Cleanup
-    #wave_gen.disable(ch_pos)
-    #wave_gen.disable(ch_neg)
 
     logger.debug("tone %.1f Hz, Vrms %.6f, %d samples",
                  freq_hz, vrms, raw.size)
     return freq_hz, vrms
 
+# TODO: Fikse konsistent amplitude
 # -- Frequency response ------------------------------------------------------
 def run_freq_response(args, logger, ace):
     odr_hz      = SLAVE_ODR_MAP[args.odr_code]
@@ -384,6 +373,8 @@ def run_freq_response(args, logger, ace):
         args.points, args.runs,
         odr_hz/1e3, filter_name, args.amplitude*2
     )
+
+    ace.setup_capture(args.samples, args.odr_code)
 
     freqs = np.logspace(
         math.log10(args.freq_start),
@@ -398,7 +389,7 @@ def run_freq_response(args, logger, ace):
     power_runs = np.zeros((args.runs, args.points), dtype=np.float64)
 
     for run_idx in range(args.runs):
-        logger.info("run %d / %d", run_idx + 1, args.runs)
+        logger.info("Run %d / %d", run_idx + 1, args.runs)
         for i, f in enumerate(freqs):
             _, vrms = measure_tone(
                 args, ace, wave_gen, f, odr_hz,
@@ -406,7 +397,7 @@ def run_freq_response(args, logger, ace):
                 args.settle_cycles, args.capture_cycles,
                 logger
             )
-            power_runs[run_idx, i] = vrms**2    # store power
+            power_runs[run_idx, i] = vrms**2    # Store power
 
     wave_gen.disable(1)
     wave_gen.disable(2)
@@ -414,21 +405,23 @@ def run_freq_response(args, logger, ace):
     mean_power = power_runs.mean(axis=0)
 
     if args.runs > 1:
-        std_power = power_runs.std(axis=0, ddof=1)      # unbiased σ
-        vrms_err  = 0.5 * std_power / np.sqrt(mean_power)   # σ(Vrms)
+        std_power = power_runs.std(axis=0, ddof=1)      # Unbiased std
+        vrms_err  = 0.5 * std_power / np.sqrt(mean_power)   # Standard error
     else:
         std_power = np.zeros_like(mean_power)
-        vrms_err  = np.zeros_like(mean_power)           # no uncertainty
+        vrms_err  = np.zeros_like(mean_power)           # No uncertainty
 
     vrms_avg = np.sqrt(mean_power)
     input_peak = args.amplitude / 2.0
     gains      = vrms_avg * np.sqrt(2) / input_peak
     gain_err   = (vrms_err / gains) if args.runs > 1 else None
 
-    ref = np.median(gains[:max(3, args.points // 20)])  # median of first ~5 %
+    # TODO: Fikse at man kan kun ha 1 run
+
+    ref = np.median(gains[:max(3, args.points // 20)])  # Median of first ~5 %
     gains_norm = gains / ref
     gdB_norm   = 20 * np.log10(gains_norm)
-    err_dB     = 20 * np.log10(1 + gain_err)            # small-angle approx
+    err_dB     = 20 * np.log10(1 + gain_err)            # Small-angle approx
 
     idx = np.where(gdB_norm <= -3.0)[0]
     if idx.size:
@@ -443,7 +436,7 @@ def run_freq_response(args, logger, ace):
     else:
         logger.info("-3 dB point not in sweep range")
 
-    passband_dB = gdB_norm[ freqs < 1000 ]              # first decade
+    passband_dB = gdB_norm[ freqs < 1000 ]              # First decade
     mu   = passband_dB.mean()
     s    = passband_dB.std(ddof=1)
     ci95 = 1.96 * s / np.sqrt(len(passband_dB))
@@ -577,12 +570,10 @@ def setup_parsers():
                     help='AWG channel')
     fr.add_argument('--freq-start', dest='freq_start', type=float, default=400.0,
                     help='Sweep start frequency [Hz]')
-    fr.add_argument('--freq-stop', dest='freq_stop', type=float, default=650000.0,
+    fr.add_argument('--freq-stop', dest='freq_stop', type=float, default=625000.0,
                     help='Sweep stop frequency [Hz]')
     fr.add_argument('--points', dest='points', type=int, default=250,
                     help='Amount of step points to sweep')
-    fr.add_argument('--log-freq', dest='log_freq', action='store_true',
-                    help='Use logarithmic sweep (default is linear)')
     fr.add_argument('--amplitude', dest='amplitude', type=float, default=1.0,
                     help='Differential Vpp of the sine sweep')
     fr.add_argument('--offset', dest='offset', type=float, default=0.0,
