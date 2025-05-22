@@ -173,49 +173,6 @@ def fft_spectrum(raw_data: np.ndarray,
     freqs = np.fft.rfftfreq(N, d=1.0/sampling_freq)
     return freqs, mags, corr
 
-
-
-def compute_bandwidth(frequencies: np.ndarray,
-                      gains: np.ndarray,
-                      db: bool = False
-                     ) -> float:
-    """
-    Find the -3 dB cutoff of a gain sweep.
-    If db=True, gains are in dB; else linear.
-    Returns cutoff frequency in Hz.
-    """
-    f = np.asarray(frequencies)
-    g = np.asarray(gains, dtype=float)
-
-    # drop NaNs
-    mask = ~np.isnan(g)
-    f, g = f[mask], g[mask]
-    if f.size < 2:
-        return np.nan
-
-    # reference passband
-    if db:
-        ref = np.max(g)
-        target = ref - 3.0
-    else:
-        ref = np.max(g)
-        target = ref/np.sqrt(2.0)
-
-    # find first crossing
-    below = np.where(g < target)[0]
-    if below.size == 0:
-        return f[-1]
-    idx = below[0]
-    if idx == 0:
-        return f[0]
-
-    # linear interpolate between idx-1 and idx
-    f1, f2 = f[idx-1], f[idx]
-    g1, g2 = g[idx-1], g[idx]
-    if abs(g2 - g1) < 1e-12:
-        return f1
-    return f1 + (target - g1)*(f2 - f1)/(g2 - g1)
-
 # Compute DC gain and offset errors from test data.
 # param applied: sequence of nominal voltages applied by SMU
 # param verified: sequence of actual voltages measured by DMM (or None)
@@ -265,3 +222,17 @@ def find_spur_rms(freqs, spectrum, target_freq, span_hz=5e3):
     v_peak  = spectrum[peak_idx]
     v_rms   = v_peak / np.sqrt(2)
     return v_rms, freqs[peak_idx]
+
+def compute_bandwidth(freqs, gains, logger):
+    # normalise to the gain plateau – use the median of the first N points
+    N0    = max(3, len(gains)//20)          # ~5 % of the sweep
+    ref   = np.median(gains[:N0])
+    gdB   = 20*np.log10(gains / ref)        # dB w.r.t. pass-band
+    below = np.where(gdB <= -3)[0]
+    if below.size:
+        i     = below[0]
+        f_3dB = np.interp(-3, [gdB[i-1], gdB[i]], [freqs[i-1], freqs[i]])
+        logger.info("-3 dB bandwidth: %.0f Hz", f_3dB)
+        return f_3dB
+    logger.info("-3 dB point not inside sweep range")
+    return None

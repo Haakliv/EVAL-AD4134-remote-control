@@ -143,18 +143,50 @@ def plot_settling_time(
 # param gains: array of gain values (linear scale)
 # param out_file: filename to save the figure (PNG)
 # param show: if True, display the plot interactively
-def plot_freq_response(freqs, gains, out_file=None, show=False):
+def plot_freq_response(freqs,
+                       gains,
+                       runs: int,
+                       amplitude_vpp: float,
+                       out_file: str | None = None,
+                       show: bool = False,
+                       err_dB: np.ndarray | None = None):
+    """
+    Frequency-response plot.
+
+    Parameters
+    ----------
+    freqs, gains          : sweep vectors (linear gain)
+    runs                  : how many sweeps were averaged
+    amplitude_vpp         : differential drive (Vpp)
+    out_file, show, err_dB: as before
+    """
     plt.figure()
-    plt.semilogx(freqs, 20*np.log10(gains))
-    plt.xlabel('Frequency [Hz]')
-    plt.ylabel('Gain [dB]')
-    plt.title('Frequency Response')
+    gdB = 20 * np.log10(gains)
+
+    if err_dB is None:
+        plt.semilogx(freqs, gdB)
+    else:
+        plt.semilogx(freqs, gdB, label="mean")
+        plt.fill_between(freqs,
+                         gdB - 1.96 * err_dB,
+                         gdB + 1.96 * err_dB,
+                         alpha=0.2, label="±95 % CI")
+        plt.legend()
+
+    plt.xlabel("Frequency [Hz]")
+    plt.ylabel("Gain [dB]")
+    plt.title(
+        f"{runs}-run Frequency Response  "
+        f"@ {amplitude_vpp*2:.2f} Vpp (normalised)"
+    )
+    plt.ylim((-25, 6))
+    plt.grid(True, which="both", ls=":")
     plt.tight_layout()
+
     if out_file:
-        plt.savefig(out_file)
+        plt.savefig(out_file, dpi=300)
     if show:
         plt.show()
-
 
 def plot_dc_gain(actual_vs, adc_means, out_file=None, show=False):
     plt.figure()

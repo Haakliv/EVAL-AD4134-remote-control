@@ -243,8 +243,8 @@ def run_settling_time(args, logger, ace):
                 odr, filt, args.runs, args.amplitude, args.frequency)
 
     # ----- configure AWG -----
-    gen = WaveformGenerator(args.sdg_host)
-    gen.pulse_diff(args.frequency, args.amplitude, args.offset,
+    gen = WaveformGenerator(args.sdg_host, "PULSE", args.offset)
+    gen.pulse_diff(args.frequency, args.amplitude,
                    low_pct=50.0, edge_time=2e-9)
     time.sleep(0.5)
 
@@ -317,153 +317,150 @@ def run_settling_time(args, logger, ace):
         )
 # TODO: Wavegen is not differential, fix the calculation of the gain, clean up the code, find a way to make measurements quicker?
 
-# -- Frequency response ------------------------------------------------------
-def run_freq_response(args, logger, ace):
-    odr_hz = SLAVE_ODR_MAP[args.odr_code]
-    filter_name = SINC_FILTER_MAP[args.filter_code]
+def measure_tone(
+        args,
+        ace_client,
+        wave_gen: "WaveformGenerator",
+        freq_hz: float,
+        odr_hz: float,
+        amplitude: float,
+        offset: float,
+        settle_cycles: int,
+        capture_cycles: int,
+        logger,
+        ch_pos: int = 1,
+        ch_neg: int = 2,
+):
+    # 1) Program the generator
+    wave_gen.sine_diff(freq_hz, amplitude, offset,
+                       ch_pos=ch_pos, ch_neg=ch_neg)
 
-    # warn on ADC vs Sinc6 settle
-    adc_settle = 6.01e-6
-    sinc6_settle = 6.0 / odr_hz
-    if adc_settle < sinc6_settle and not args.no_board:
+    # 2) Wait for the DAC and ADC to settle
+    time.sleep(settle_cycles / freq_hz)
+
+    # 3) Work out how many samples the requested capture would need
+    samples = int(odr_hz * capture_cycles / freq_hz)
+    logger.info(f"Capture @ {freq_hz:.1f} Hz = {samples} samples")
+
+    if samples > SAMPLES_DEFAULT:
+        # shrink capture_cycles so we still fit in one shot
+        new_capture_cycles = int(SAMPLES_DEFAULT * freq_hz / odr_hz)
         logger.warning(
-            "User-set ADC settle (%.2fus) < theoretical Sinc6 settle (%.2fus)" %
-            (adc_settle * 1e6, sinc6_settle * 1e6)
+            "tone %.1f Hz: %d samples would exceed buffer; "
+            "reducing capture_cycles from %d to %d",
+            freq_hz, samples, capture_cycles, new_capture_cycles
         )
+        capture_cycles = new_capture_cycles
+        samples = SAMPLES_DEFAULT
 
-    # pre-capture settle
-    wavegen_settle = getattr(args, "wavegen_settle_time", 0.5)
-    pre_capture_settle = max(wavegen_settle, adc_settle)
-
-    total_samples = int(args.sweep_time * odr_hz)
-    segments = math.ceil(total_samples / SAMPLES_DEFAULT)
-    samples_per_segment = SAMPLES_DEFAULT
-
-    logger.info(
-        "Continuous-chirp Freq-response: %.1f-%.1f Hz, Runs=%d, Segments=%d, "
-        "Samples/seg=%d, Vpp=%.2f, Offset=%.2fV, ODR=%.0fkHz, Filter=%s",
-        args.freq_start, args.freq_stop, args.runs, segments,
-        samples_per_segment, args.amplitude, args.offset, odr_hz / 1e3, filter_name
+    # 4) One-shot capture -> numpy array
+    raw = capture_samples(
+        ace_client=ace_client,
+        sample_count=samples,
+        odr_code=args.odr_code,     # pass through whatever you parsed
+        output_dir=os.getcwd()             # or a folder if you like
     )
 
-    # init AWG
-    wave_gen = None
-    if args.sdg_host:
-        wave_gen = WaveformGenerator(args.sdg_host)
-        wave_gen.sweep_diff(
-            start_hz=args.freq_start,
-            stop_hz=args.freq_stop,
-            sweep_time_s=args.sweep_time,
-            linear=not args.log_freq,
-            amplitude=args.amplitude,
-            offset=args.offset
-        )
-        wave_gen.sdg.enable_output(1)
-        wave_gen.sdg.enable_output(2)
-    elif not args.no_board:
-        logger.error("SDG host required unless --no-board.")
-        return
+    # 5) Vrms
+    vrms = float(np.sqrt(np.mean(raw.astype(np.float64) ** 2)))
 
-    if not args.no_board and ace is None:
-        logger.error("ACE client is required for hardware capture.")
-        return
+    # 6) Cleanup
+    #wave_gen.disable(ch_pos)
+    #wave_gen.disable(ch_neg)
 
-    measured_spectra = []
-    try:
-        for run in range(1, args.runs + 1):
-            logger.info(
-                "Run %d/%d: waiting %.3f s to settle...",
-                run, args.runs, pre_capture_settle
+    logger.debug("tone %.1f Hz, Vrms %.6f, %d samples",
+                 freq_hz, vrms, raw.size)
+    return freq_hz, vrms
+
+# -- Frequency response ------------------------------------------------------
+def run_freq_response(args, logger, ace):
+    odr_hz      = SLAVE_ODR_MAP[args.odr_code]
+    filter_name = SINC_FILTER_MAP[args.filter_code]
+
+    logger.info(
+        "Step-sine response: %.1f Hz -> %.1f Hz  "
+        "(%d pts, %d runs)  ODR=%.0f kHz, Filter=%s, Vpp=%.2f",
+        args.freq_start, args.freq_stop,
+        args.points, args.runs,
+        odr_hz/1e3, filter_name, args.amplitude*2
+    )
+
+    freqs = np.logspace(
+        math.log10(args.freq_start),
+        math.log10(args.freq_stop),
+        args.points
+    )
+
+    wave_gen = WaveformGenerator(args.sdg_host)
+    wave_gen.enable(1)
+    wave_gen.enable(2)
+
+    power_runs = np.zeros((args.runs, args.points), dtype=np.float64)
+
+    for run_idx in range(args.runs):
+        logger.info("run %d / %d", run_idx + 1, args.runs)
+        for i, f in enumerate(freqs):
+            _, vrms = measure_tone(
+                args, ace, wave_gen, f, odr_hz,
+                args.amplitude, args.offset,
+                args.settle_cycles, args.capture_cycles,
+                logger
             )
-            time.sleep(pre_capture_settle)
+            power_runs[run_idx, i] = vrms**2    # store power
 
-            if args.no_board:
-                logger.info(
-                    "--no-board: triggering AWG and sleeping for %.3f s",
-                    args.sweep_time
-                )
-                wave_gen.trigger()
-                time.sleep(args.sweep_time)
-                break
+    wave_gen.disable(1)
+    wave_gen.disable(2)
 
-            logger.info(
-                "Triggering AWG, capturing %d segments of %d samples each...",
-                segments, samples_per_segment
-            )
-            wave_gen.trigger()
-            t0 = time.time()
+    mean_power = power_runs.mean(axis=0)
 
-            raw = capture_samples_continuous(
-                ace_client=ace,
-                sweep_time=args.sweep_time,
-                samples_per_segment=SAMPLES_DEFAULT,
-                scale=ADC_LSB,
-                odr_code=args.odr_code,
-                timeout_ms=int(SAMPLES_DEFAULT / odr_hz * 1000 + 2000),
-                output_dir=os.getcwd(),
-                run_idx=run
-            )
+    if args.runs > 1:
+        std_power = power_runs.std(axis=0, ddof=1)      # unbiased σ
+        vrms_err  = 0.5 * std_power / np.sqrt(mean_power)   # σ(Vrms)
+    else:
+        std_power = np.zeros_like(mean_power)
+        vrms_err  = np.zeros_like(mean_power)           # no uncertainty
 
-
-            dt = time.time() - t0
-            logger.info(
-                "Captured %.2f s (%.0f samples) starting at %s",
-                dt, raw.size, time.strftime("%H:%M:%S", time.localtime(t0))
-            )
-
-            if raw.size == 0:
-                logger.warning("Run %d: no data captured", run)
-                continue
-
-            freqs, mags, corr = fft_spectrum(raw, odr_hz)
-            measured_spectra.append((freqs, mags, corr, raw.size))
-
-    finally:
-        if wave_gen:
-            logger.info("Disabling AWG outputs")
-            wave_gen.sdg.interface.write("C1:OUTP OFF")
-            wave_gen.sdg.interface.write("C2:OUTP OFF")
-
-    if not measured_spectra:
-        logger.error("No valid sweep runs - aborting analysis")
-        return
-
-    # average spectra
-    # Truncate all spectra to the shortest length
-    min_len = min(spectrum[1].shape[0] for spectrum in measured_spectra)
-    if any(spectrum[1].shape[0] != min_len for spectrum in measured_spectra):
-        logger.warning(f"Spectra lengths differ, truncating all to {min_len} samples.")
-
-    # Truncate each spectrum
-    measured_spectra = [
-        (freqs[:min_len], mags[:min_len], corr, Npts)
-        for freqs, mags, corr, Npts in measured_spectra
-    ]
-
-    fft_freqs = measured_spectra[0][0]
-    acc_mags = np.zeros_like(fft_freqs)
-    corr = measured_spectra[0][2]
-    Npts = measured_spectra[0][3]
-    for _, mags, _, _ in measured_spectra:
-        acc_mags += mags
-    avg_mags = acc_mags / len(measured_spectra)
-
-    # convert to gain
+    vrms_avg = np.sqrt(mean_power)
     input_peak = args.amplitude / 2.0
-    gains = (2.0 * avg_mags * corr / Npts) / input_peak
+    gains      = vrms_avg * np.sqrt(2) / input_peak
+    gain_err   = (vrms_err / gains) if args.runs > 1 else None
 
-    # compute −3 dB cutoff
-    cutoff = compute_bandwidth(fft_freqs, gains)
-    logger.info("-3 dB bandwidth: %.2f Hz", cutoff)
+    ref = np.median(gains[:max(3, args.points // 20)])  # median of first ~5 %
+    gains_norm = gains / ref
+    gdB_norm   = 20 * np.log10(gains_norm)
+    err_dB     = 20 * np.log10(1 + gain_err)            # small-angle approx
 
-    if args.plot or args.show:
-        plot_freq_response(
-            fft_freqs,
-            gains,
-            out_file=args.plot if isinstance(args.plot, str) else f"chirp_{args.runs}runs.png",
-            show=args.show
+    idx = np.where(gdB_norm <= -3.0)[0]
+    if idx.size:
+        k   = idx[0]
+        f3dB = np.interp(-3.0,
+                         [gdB_norm[k-1], gdB_norm[k]],
+                         [freqs[k-1],    freqs[k]])
+        logger.info(
+            "-3 dB bandwidth: %.0f Hz  (mean of %d runs, 95%% CI shown below)",
+            f3dB, args.runs
         )
+    else:
+        logger.info("-3 dB point not in sweep range")
 
+    passband_dB = gdB_norm[ freqs < 1000 ]              # first decade
+    mu   = passband_dB.mean()
+    s    = passband_dB.std(ddof=1)
+    ci95 = 1.96 * s / np.sqrt(len(passband_dB))
+    logger.info(
+        "Pass-band gain: %.2f dB +- %.2f dB (95%% CI), "
+        "std = %.2f dB over %d runs",
+        mu, ci95, s, args.runs
+    )
+
+    plot_freq_response(freqs,
+                   gains_norm,
+                   runs=args.runs,
+                   amplitude_vpp=args.amplitude,
+                   out_file=(args.plot if isinstance(args.plot, str)
+                             else "step_bode.png"),
+                   show=args.show,
+                   err_dB=err_dB if args.runs > 1 else None)
 
 # -- DC gain / offset ---------------------------------------------------------
 def run_dc_gain(args, logger, ace):
@@ -578,18 +575,22 @@ def setup_parsers():
                     default=SDG_HOST_DEFAULT, help='SDG address')
     fr.add_argument('--channel', type=int, choices=[1, 2], default=1,
                     help='AWG channel')
-    fr.add_argument('--freq-start', dest='freq_start', type=float, default=10.0,
+    fr.add_argument('--freq-start', dest='freq_start', type=float, default=400.0,
                     help='Sweep start frequency [Hz]')
     fr.add_argument('--freq-stop', dest='freq_stop', type=float, default=650000.0,
                     help='Sweep stop frequency [Hz]')
-    fr.add_argument('--sweep-time', dest='sweep_time', type=float, default=10.0,
-                    help='Total sweep duration [s]')
+    fr.add_argument('--points', dest='points', type=int, default=250,
+                    help='Amount of step points to sweep')
     fr.add_argument('--log-freq', dest='log_freq', action='store_true',
                     help='Use logarithmic sweep (default is linear)')
     fr.add_argument('--amplitude', dest='amplitude', type=float, default=1.0,
                     help='Differential Vpp of the sine sweep')
     fr.add_argument('--offset', dest='offset', type=float, default=0.0,
                     help='Common-mode DC offset [V]')
+    fr.add_argument('--settle_cycles', dest='settle_cycles', type=int, default=8,
+                    help='Number of cycles to wait before capturing')
+    fr.add_argument('--capture_cycles', dest='capture_cycles', type=int, default=32,
+                    help='Number of cycles to capture')
     fr.add_argument('--no-board', dest='no_board', action='store_true',
                     help='Dry-run: skip ADC capture')
     add_common_adc_args(fr)

@@ -3,39 +3,30 @@ from ace_client import limit_vpp_offset, MAX_INPUT_RANGE
 
 # Wrapper for Siglent SDG6022X to configure and control output waveforms. Supports sine and pulse with safe amplitude limiting.
 class WaveformGenerator:
-    def __init__(self, host='192.168.1.100'):
+    offset = 0.0
+
+    def __init__(self, host='192.168.1.100', waveform='SINE', offset=0.0):
+        max_in = MAX_INPUT_RANGE*2
+
+        if abs(offset) > max_in:
+            offset = max_in if offset > 0 else -max_in
+        self.offset = offset
+
         self.sdg = Sdg6022x(host)
         self.disable(1)
         self.disable(2)
+        self.sdg.interface.write("C1:MODE PHASE-LOCKED")
+        self.sdg.interface.write("C2:OUTP PLRT,INVT")
+        self.sdg.set_waveform(waveform, 1)
+        self.sdg.set_waveform(waveform, 2)
+        self.sdg.set_offset(offset, 1)
+        self.sdg.set_offset(offset, 2)
 
     # Disable output on the specified channel
     def disable(self, channel):
         self.sdg.disable_output(channel)
 
-
-    # Generate a sine wave
-    # param channel: Output channel (1 or 2)
-    # param frequency: Frequency in Hz
-    # param amplitude: Peak-to-peak voltage in Vpp
-    # param offset: DC offset in V
-    def sine(self, channel, frequency, amplitude, offset):
-        max_in = MAX_INPUT_RANGE
-        if abs(offset) > max_in:
-            old = offset
-            offset = max_in if offset > 0 else -max_in
-            print(f"Warning: offset {old}V outside ±{max_in}V, clamped to {offset}V")
-
-        safe_vpp = limit_vpp_offset(amplitude, offset)
-        if safe_vpp <= 0:
-            raise ValueError(
-                f"Offset={offset} V already at rail ±{max_in} V—no headroom for any Vpp!"
-            )
-
-        self.sdg.set_waveform('SINE', channel)
-        self.sdg.set_frequency(frequency, channel)
-        self.sdg.set_amplitude(safe_vpp, channel)
-        self.sdg.set_offset(offset, channel)
-        self.sdg.set_output_load('50', channel)
+    def enable(self, channel):
         self.sdg.enable_output(channel)
 
     # ------------------------------------------------------------------
@@ -45,27 +36,21 @@ class WaveformGenerator:
         self,
         frequency: float,
         amplitude: float,
-        offset: float,
         low_pct: float = 80.0,     # 4 ms low, 1 ms high at 200 Hz
         edge_time: float = 2e-9,
         ch_pos: int = 1,
         ch_neg: int = 2,
     ):
-        max_in = MAX_INPUT_RANGE*2
-        if abs(offset) > max_in:
-            offset = max_in if offset > 0 else -max_in
 
-        safe_vpp = limit_vpp_offset(amplitude, offset)
+        safe_vpp = limit_vpp_offset(amplitude, self.offset)
         if safe_vpp <= 0:
             raise ValueError("Offset too close to rail for given Vpp")
 
         high_pct = 100.0 - low_pct  # SDG’s DUTY = %HIGH
 
         for ch in (ch_pos, ch_neg):
-            self.sdg.set_waveform("PULSE", ch)
             self.sdg.set_frequency(frequency, ch)
             self.sdg.set_amplitude(safe_vpp, ch)
-            self.sdg.set_offset(offset, ch)
 
             # correct 50 Ω load, error in library
             self.sdg.interface.write(f"C{ch}:OUTP LOAD,50")
@@ -105,78 +90,5 @@ class WaveformGenerator:
             )
 
         # CH1: normal sine
-        self.sdg.set_waveform('SINE', ch_pos)
         self.sdg.set_frequency(frequency, ch_pos)
-        self.sdg.set_amplitude(safe_vpp/2.0, ch_pos)
-        self.sdg.set_offset(offset, ch_pos)
-        self.sdg.set_output_load('50', ch_pos)
-
-        # CH2: inverted sine
-        self.sdg.set_waveform('SINE', ch_neg)
         self.sdg.set_frequency(frequency, ch_neg)
-        self.sdg.set_amplitude(safe_vpp/2.0, ch_neg)
-        self.sdg.set_offset(offset, ch_neg)
-        self.sdg.set_output_load('50', ch_neg)
-        # invert phase
-        self.sdg.interface.write(f"C{ch_neg}:PHAS {180.0}")
-        
-        # enable both
-        self.sdg.enable_output(ch_pos)
-        self.sdg.enable_output(ch_neg)
-
-    def sweep_diff(self,
-                start_hz: float,
-                stop_hz: float,
-                sweep_time_s: float,
-                linear: bool = True,
-                amplitude: float = 1.0,
-                offset: float = 0.0,
-                ch_pos: int = 1,
-                ch_neg: int = 2):
-        """
-        Corrected Differential sine sweep on ch_pos/ch_neg from start_hz to stop_hz
-        over sweep_time_s seconds, using SWWV mode.
-        """
-
-        max_cm = MAX_INPUT_RANGE
-        offset = max(min(offset, max_cm), -max_cm)
-
-        safe_vpp = limit_vpp_offset(amplitude, offset)
-        if safe_vpp <= 0:
-            raise ValueError(f"Offset={offset} V leaves no headroom for Vpp={amplitude} V")
-        
-        safe_vpp = safe_vpp / 4.0
-
-        mode = "LINE" if linear else "LOG"
-        for ch in (ch_pos, ch_neg):
-            self.sdg.set_waveform('SINE', ch)
-            self.sdg.set_frequency(start_hz, ch)
-            self.sdg.set_amplitude(safe_vpp, ch)
-            self.sdg.set_offset(offset, ch)
-            self.sdg.set_output_load('50', ch)
-
-            self.sdg.interface.write(f"C{ch}:SweepWaVe STATE,ON")
-            self.sdg.interface.write(f"C{ch}:SweepWaVe TRSR,MAN")
-            self.sdg.interface.write(f"C{ch}:SweepWaVe START,{start_hz}")
-            self.sdg.interface.write(f"C{ch}:SweepWaVe STOP,{stop_hz}")
-            self.sdg.interface.write(f"C{ch}:SweepWaVe TIME,{sweep_time_s}")
-            self.sdg.interface.write(f"C{ch}:SweepWaVe SWMD,{mode}")
-
-            self.sdg.interface.write(f"C{ch}:SweepWaVe TRMD,ON")
-            self.sdg.interface.write(f"C{ch}:SweepWaVe EDGE,RISE")
-
-        # Explicitly set differential phase
-        self.sdg.interface.write(f"C{ch_pos}:SWWV CARR,PHSE,0")
-        self.sdg.interface.write(f"C{ch_neg}:SWWV CARR,PHSE,0")
-
-        # Simultaneous trigger
-        self.sdg.interface.write(f"C{ch_pos}:SWWV MTRIG; C{ch_neg}:SWWV MTRIG")
-
-
-    def trigger(self, ch_pos: int = 1, ch_neg: int = 2):
-        """
-        Send the software trigger (MTRIG) to both channels to actually start the sweep.
-        Call this after your ADC capture is armed.
-        """
-        for ch in (ch_pos, ch_neg):
-            self.sdg.interface.write(f"C{ch}:SweepWaVe MTRIG")
