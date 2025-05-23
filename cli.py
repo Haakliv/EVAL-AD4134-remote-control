@@ -452,8 +452,7 @@ def run_freq_response(args, logger, ace):
                    amplitude_vpp=args.amplitude,
                    out_file=(args.plot if isinstance(args.plot, str)
                              else "step_bode.png"),
-                   show=args.show,
-                   err_dB=err_dB if args.runs > 1 else None)
+                   show=args.show)
 
 # -- DC gain / offset ---------------------------------------------------------
 def run_dc_gain(args, logger, ace):

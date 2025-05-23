@@ -141,39 +141,25 @@ def plot_settling_time(
         plt.show()
 
 # Plot frequency response
-# param freqs: array of frequency bins (Hz)
-# param gains: array of gain values (linear scale)
-# param out_file: filename to save the figure (PNG)
-# param show: if True, display the plot interactively
 def plot_freq_response(freqs,
                        gains,
                        runs: int,
                        amplitude_vpp: float,
                        out_file: str | None = None,
-                       show: bool = False,
-                       err_dB: np.ndarray | None = None):
+                       show: bool = False):
     """
-    Frequency-response plot.
+    Frequency-response plot (no error overlay).
 
     Parameters
     ----------
-    freqs, gains          : sweep vectors (linear gain)
-    runs                  : how many sweeps were averaged
-    amplitude_vpp         : differential drive (Vpp)
-    out_file, show, err_dB: as before
+    freqs, gains    : sweep vectors (linear gain)
+    runs            : how many sweeps were averaged
+    amplitude_vpp   : differential drive (Vpp)
+    out_file, show  : as before
     """
     plt.figure()
     gdB = 20 * np.log10(gains)
-
-    if err_dB is None:
-        plt.semilogx(freqs, gdB)
-    else:
-        plt.semilogx(freqs, gdB, label="mean")
-        plt.fill_between(freqs,
-                         gdB - 1.96 * err_dB,
-                         gdB + 1.96 * err_dB,
-                         alpha=0.2, label="±95 % CI")
-        plt.legend()
+    plt.semilogx(freqs, gdB, label="Mean")
 
     plt.xlabel("Frequency [Hz]")
     plt.ylabel("Gain [dB]")
@@ -184,11 +170,13 @@ def plot_freq_response(freqs,
     plt.ylim((-25, 6))
     plt.grid(True, which="both", ls=":")
     plt.tight_layout()
+    plt.legend()
 
     if out_file:
         plt.savefig(out_file, dpi=300)
     if show:
         plt.show()
+
 
 def plot_dc_gain(actual_vs, adc_means, out_file=None, show=False):
     plt.figure()
