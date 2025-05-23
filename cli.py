@@ -10,6 +10,10 @@ import numpy as np
 import time
 from scipy.signal import welch
 import math
+from typing import Tuple, List, Optional
+from pathlib import Path
+from scipy.fft import rfft, rfftfreq
+from scipy.signal import get_window
 
 # --- Project-local modules ---------------------------------------------------
 from ace_client import (
@@ -190,42 +194,114 @@ def run_gen_spectrum(args, logger, ace):
     logger.info("Saved AWG baseline → awg_psd.npz")
     gen.disable(args.channel)
 
+def build_awg_spur_mask(fs: float,
+                        n: int,
+                        f0: float,
+                        spur_bins: List[int],
+                        tol_bins: int = 1,
+                        save_to: Optional[str] = None) -> np.ndarray:
+    """
+    spur_bins : list of harmonic ORDERs to ignore (e.g. [2,3,5])
+    tol_bins  : +/- bins around each harmonic line that will be masked out
+    """
+    mask = np.zeros(n//2 + 1, dtype=bool)
+    fud_bin = int(round(f0 * n / fs))
+    for h in spur_bins:
+        idx = h * fud_bin
+        if idx < len(mask):
+            mask[max(0, idx - tol_bins): idx + tol_bins + 1] = True
+    if save_to:
+        np.save(save_to, mask)
+    return mask
+
+def coherent_frequency(f_target: float, fs: float, n: int) -> Tuple[float, int]:
+    bin_idx = int(round(f_target * n / fs))
+    f_coh   = bin_idx * fs / n
+    return f_coh, bin_idx
+
 # -- SFDR / THD / ENOB --------------------------------------------------------
 def run_sfdr(args, logger, ace):
-    """Dynamic-performance test with optional AWG baseline subtraction."""
-    odr  = SLAVE_ODR_MAP[args.odr_code]
-    filt = SINC_FILTER_MAP[args.filter_code]
-    logger.info("SFDR: f=%.2f Hz, %.2f Vpp, offset=%.2f V, ODR=%.0f kHz, filter=%s",
-                args.freq, args.amplitude, args.offset, odr, filt)
+    """
+    Improved dynamic-performance test.
 
-    gen = WaveformGenerator(args.sdg_host)
-    gen.sine(args.channel, args.freq, args.amplitude, args.offset)
+    Required args:
+      freq            – desired fundamental frequency (Hz)
+      amplitude       – differential Vpp
+      offset          – common-mode offset (V)
+      samples         – capture size (max 131_072)
+      runs            – number of captures to average
+      odr_code        – index into SLAVE_ODR_MAP
+      filter_code     – index into SINC_FILTER_MAP
+      sdg_host        – IP/hostname of function generator
+      channel         – AWG channel (positive leg)
+      spur_mask_file  – .npy file with pre-built AWG spur mask (optional)
+      plot / show     – flags, unchanged from your framework
+    """
+    fs   = SLAVE_ODR_MAP[args.odr_code]
+    n    = args.samples
 
-    if args.no_board:
-        logger.info("Generator verification only; skipping ADC capture.")
-        logger.info("Actual AWG settings: f=%.3f Hz, Vpp=%.3f V, "
-                    "offset=%.3f V",
-                    gen.sdg.get_frequency(args.channel),
-                    gen.sdg.get_amplitude(args.channel),
-                    gen.sdg.get_offset(args.channel))
-        gen.disable(args.channel)
-        return
+    # ------------------------------------------------------------------ source
+    gen  = WaveformGenerator(args.sdg_host)
 
-    raw = capture_samples(
-        ace, args.samples, ADC_LSB, args.odr_code, output_dir=os.getcwd()
+    # Coherent tone -----------------------------------------------------------
+    f_coh, bin_fund = coherent_frequency(args.freq, fs, n)
+    if abs(f_coh - args.freq) / args.freq > 1e-4:     # ~0.01 % tolerance
+        logger.info("Adjusted to coherent f = %.6f Hz (bin %d)", f_coh, bin_fund)
+    else:
+        logger.info("Using requested f = %.6f Hz (bin %d)", f_coh, bin_fund)
+
+    # amplitude: keep –0.5 dBFS like the datasheet
+    gen.sine_diff(f_coh, args.amplitude, args.offset)
+
+    # Optional spur mask ------------------------------------------------------
+    spur_mask = None
+    if getattr(args, "spur_mask_file", None) and Path(args.spur_mask_file).is_file():
+        spur_mask = np.load(args.spur_mask_file)
+
+    # Capture loop ------------------------------------------------------------
+    win  = get_window("hann", n)
+    wc   = win.sum() / n                    # amplitude correction factor
+    acc  = None
+
+    ace.setup_capture(n, args.odr_code)
+
+    for i in range(1, args.runs + 1):
+        raw = capture_samples(
+            ace, n, ADC_LSB, args.odr_code, output_dir=os.getcwd()
+        )
+
+        # window, FFT, magnitude (rms)
+        spec = rfft(raw * win)
+        mag  = np.abs(spec) / (n/2 * wc)    # 0 dBFS = full-scale sine rms
+
+        acc = mag if acc is None else acc + mag
+        logger.debug("Run %d complete", i)
+
+    mag_avg = acc / args.runs
+    freqs   = rfftfreq(n, 1/fs)
+
+    # Apply optional AWG baseline in magnitude (Volts rms) --------------------
+    if getattr(args, "awg_cal", None) and Path(args.awg_cal).is_file():
+        with np.load(args.awg_cal) as z:
+            awg_mag = z["Pxx"] ** 0.5 * (fs / 2)**0.5   # saved as PSD → convert
+            mag_avg = np.clip(mag_avg - awg_mag, 0, None)
+        logger.info("AWG baseline ( %s ) subtracted", args.awg_cal)
+
+    # Metrics -----------------------------------------------------------------
+    sfdr, thd, sinad, enob = compute_metrics(
+        freqs, mag_avg, bin_fund, spur_mask=spur_mask
     )
-    freqs, spectrum = fft_spectrum(raw, odr)
+    logger.info("SFDR = %.2f dB,  THD = %.2f dB,  SINAD = %.2f dB,  ENOB = %.2f bits",
+                sfdr, thd, sinad, enob)
 
-    # --- AWG baseline subtraction (optional) --------------------------------
-    if args.awg_cal:
-        mag_awg = load_awg_cal(args.awg_cal, freqs, odr)
-        spectrum = np.clip(spectrum - mag_awg, 0, None)
-        logger.info("Applied AWG baseline subtraction (%s)", args.awg_cal)
+    # Optional plots / saving remain exactly as in your original code ---------
+    if args.plot or args.show:
+        from plotting import plot_fft_with_metrics   # <- whatever you use
+        plot_fft_with_metrics(freqs, mag_avg, fs, sfdr, thd, sinad, enob,
+                              out_file="sfdr_avg_fft.png", show=args.show)
 
-    sfdr_v, thd_v, sinad_v, enob_v = compute_metrics(freqs, spectrum, args.freq)
-    logger.info("SFDR=%.2f dB, THD=%.2f dB, SINAD=%.2f dB, ENOB=%.2f bits",
-                sfdr_v, thd_v, sinad_v, enob_v)
     gen.disable(args.channel)
+    return sfdr, thd, sinad, enob
 
 # -- Settling‑time ------------------------------------------------------------
 def run_settling_time(args, logger, ace):

@@ -92,3 +92,5 @@ class WaveformGenerator:
         # CH1: normal sine
         self.sdg.set_frequency(frequency, ch_pos)
         self.sdg.set_frequency(frequency, ch_neg)
+        self.sdg.set_amplitude(safe_vpp, ch_pos)
+        self.sdg.set_amplitude(safe_vpp, ch_neg)

@@ -1,5 +1,6 @@
 import numpy as np
 import scipy.signal
+from typing import Tuple, List, Optional
 
 # Calculate noise floor metrics: mean, standard deviation, and peak-to-peak.
 # param raw: 1D numpy array of voltage samples
@@ -11,38 +12,54 @@ def compute_noise_floor_metrics(raw):
     return mean, std, ptp
 
 
-# Calculate SFDR, THD, SINAD, and ENOB for a single-tone input.
-# param freqs: frequency bins (Hz)
-# param spectrum: magnitude spectrum
-# param f0: fundamental frequency (Hz)
-# param num_harmonics: number of harmonics to include for THD
-# return: (sfdr_dB, thd_dB, sinad_dB, enob_bits)
-def compute_metrics(freqs, spectrum, f0, num_harmonics=5):
-    # Fundamental power
-    idx_f = np.argmin(np.abs(freqs - f0))
-    P1 = spectrum[idx_f] ** 2
+def compute_metrics(freqs: np.ndarray,
+                    mag: np.ndarray,
+                    bin_fund: int,
+                    num_harmonics: int = 5,
+                    spur_mask: Optional[np.ndarray] = None
+                    ) -> Tuple[float, float, float, float]:
+    """
+    Parameters
+    ----------
+    freqs : array
+        Frequency bins (Hz) – same length as `mag`
+    mag : array
+        Linear magnitude spectrum (Volts rms)
+    bin_fund : int
+        Index of the fundamental tone
+    num_harmonics : int
+        How many harmonics to include in THD
+    spur_mask : array of bool, optional
+        True → ignore that bin when searching for largest spur (used for
+        suppressing AWG-originating harmonics)
 
-    # Power excluding DC
-    spec_nd = spectrum.copy()
-    spec_nd[0] = 0
-    P_total = np.sum(spec_nd ** 2)
-    P_noise_dist = P_total - P1
+    Returns  (sfdr_dB, thd_dB, sinad_dB, enob_bits)
+    """
+    P1 = mag[bin_fund] ** 2                             # fundamental power
 
-    sinad = 10 * np.log10(P1 / P_noise_dist)
-    enob = (sinad - 1.76) / 6.02
-
-    # THD: sum power of first `num_harmonics` harmonics
+    # THD ---------------------------------------------------------------------
     P_harm = 0.0
     for n in range(2, num_harmonics + 1):
-        idx_h = np.argmin(np.abs(freqs - n * f0))
-        P_harm += spectrum[idx_h] ** 2
-    thd = 10 * np.log10(P_harm / P1)
+        idx = bin_fund * n
+        if idx < len(mag):
+            P_harm += mag[idx] ** 2
+    thd = 10 * np.log10(P_harm / P1) if P_harm > 0 else -np.inf
 
-    # SFDR: exclude fundamental, find largest spur
-    spec_spurs = spec_nd.copy()
-    spec_spurs[idx_f] = 0
-    max_spur = np.max(spec_spurs)
-    sfdr = 20 * np.log10(spectrum[idx_f] / max_spur)
+    # noise + distortion (exclude DC and fundamental)
+    mask = np.ones_like(mag, dtype=bool)
+    mask[0] = False
+    mask[bin_fund] = False
+    if spur_mask is not None:
+        mask &= ~spur_mask
+    P_nd = np.sum(mag[mask] ** 2)
+    sinad = 10 * np.log10(P1 / P_nd) if P_nd > 0 else np.inf
+    enob  = (sinad - 1.76) / 6.02
+
+    # SFDR --------------------------------------------------------------------
+    spur_candidates = mag.copy()
+    spur_candidates[~mask] = 0.0                # suppress bins we ignore
+    max_spur = spur_candidates.max()
+    sfdr = 20 * np.log10(mag[bin_fund] / max_spur) if max_spur > 0 else np.inf
 
     return sfdr, thd, sinad, enob
 
