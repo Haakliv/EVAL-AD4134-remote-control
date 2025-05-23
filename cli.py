@@ -316,7 +316,6 @@ def run_settling_time(args, logger, ace):
         )
 
 def measure_tone(
-        args,
         ace_client,
         wave_gen: "WaveformGenerator",
         freq_hz: float,
@@ -360,7 +359,6 @@ def measure_tone(
                  freq_hz, vrms, raw.size)
     return freq_hz, vrms
 
-# TODO: Fikse konsistent amplitude
 # -- Frequency response ------------------------------------------------------
 def run_freq_response(args, logger, ace):
     odr_hz      = SLAVE_ODR_MAP[args.odr_code]
@@ -392,7 +390,7 @@ def run_freq_response(args, logger, ace):
         logger.info("Run %d / %d", run_idx + 1, args.runs)
         for i, f in enumerate(freqs):
             _, vrms = measure_tone(
-                args, ace, wave_gen, f, odr_hz,
+                ace, wave_gen, f, odr_hz,
                 args.amplitude, args.offset,
                 args.settle_cycles, args.capture_cycles,
                 logger
@@ -404,24 +402,13 @@ def run_freq_response(args, logger, ace):
 
     mean_power = power_runs.mean(axis=0)
 
-    if args.runs > 1:
-        std_power = power_runs.std(axis=0, ddof=1)      # Unbiased std
-        vrms_err  = 0.5 * std_power / np.sqrt(mean_power)   # Standard error
-    else:
-        std_power = np.zeros_like(mean_power)
-        vrms_err  = np.zeros_like(mean_power)           # No uncertainty
-
     vrms_avg = np.sqrt(mean_power)
-    input_peak = args.amplitude / 2.0
+    input_peak = args.amplitude
     gains      = vrms_avg * np.sqrt(2) / input_peak
-    gain_err   = (vrms_err / gains) if args.runs > 1 else None
-
-    # TODO: Fikse at man kan kun ha 1 run
 
     ref = np.median(gains[:max(3, args.points // 20)])  # Median of first ~5 %
     gains_norm = gains / ref
     gdB_norm   = 20 * np.log10(gains_norm)
-    err_dB     = 20 * np.log10(1 + gain_err)            # Small-angle approx
 
     idx = np.where(gdB_norm <= -3.0)[0]
     if idx.size:

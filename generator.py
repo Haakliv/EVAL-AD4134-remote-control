@@ -75,7 +75,7 @@ class WaveformGenerator:
                   ch_pos: int = 1,
                   ch_neg: int = 2):
         """
-        Differential sine: CH1 = +½Vpp, CH2 = –½Vpp, both with common-mode offset.
+        Differential sine: CH1 = +1/2Vpp, CH2 = -1/2Vpp, both with common-mode offset.
         """
         max_in = MAX_INPUT_RANGE*2
         # clamp offset
