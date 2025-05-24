@@ -5,60 +5,6 @@ from ace_client import MAX_INPUT_RANGE, ADC_RES_BITS
 MICRO = 1e6          # volts → micro-volts conversion factor
 DB_REF = 1.0         # dB reference ( 1 V_rms ).  Change if you prefer dBVμ etc.
 
-# Plot time-domain raw data
-# param fs: sampling frequency (Hz)
-# param raw: 1D array of voltage samples
-# param out_file: filename to save the figure (PNG)
-# param show: if True, display the plot interactively
-def plot_raw(raw, out_file=None, show=False):
-    plt.figure()
-    plt.plot(raw)
-    plt.xlabel('Sample Index')
-    plt.ylabel('Voltage [V]')
-    plt.title('Noise Floor (Raw)')
-    plt.tight_layout()
-    if out_file:
-        plt.savefig(out_file)
-    if show:
-        plt.show()
-
-
-# Plot histogram of raw data
-# param raw: 1D array of voltage samples
-# param bins: number of histogram bins
-# param out_file: filename to save the figure (PNG)
-# param show: if True, display the plot interactively
-def plot_histogram(raw, bins=100, out_file=None, show=False):
-    plt.figure()
-    plt.hist(raw, bins=bins)
-    plt.xlabel('Voltage [V]')
-    plt.ylabel('Count')
-    plt.title('Histogram')
-    plt.tight_layout()
-    if out_file:
-        plt.savefig(out_file)
-    if show:
-        plt.show()
-
-
-# Plot FFT of raw data
-# param freqs: array of frequency bins (Hz)
-# param spectrum: magnitude spectrum values
-# param out_file: filename to save the figure (PNG)
-# param show: if True, display the plot interactively
-def plot_fft(freqs, spectrum, out_file=None, show=False):
-    plt.figure()
-    plt.plot(freqs, spectrum)
-    plt.xlabel('Frequency [Hz]')
-    plt.ylabel('Magnitude')
-    plt.title('FFT')
-    plt.tight_layout()
-    if out_file:
-        plt.savefig(out_file)
-    if show:
-        plt.show()
-
-
 def plot_settling_time(
     raw_runs: list[np.ndarray],
     start_idxs: list[int],
@@ -177,20 +123,6 @@ def plot_freq_response(freqs,
     if show:
         plt.show()
 
-
-def plot_dc_gain(actual_vs, adc_means, out_file=None, show=False):
-    plt.figure()
-    plt.plot(actual_vs, adc_means, 'o-')
-    plt.xlabel('Actual Voltage (V)')
-    plt.ylabel('ADC Measured Voltage (V)')
-    plt.title('DC Gain and Offset')
-    plt.tight_layout()
-    if out_file:
-        plt.savefig(out_file)
-    if show:
-        plt.show()
-
-# New aggregated plotting functions
 # Plot aggregated histogram with runs, ODR, and filter info
 # param raw_all: concatenated array from all runs
 # param bins: number of histogram bins
@@ -352,3 +284,96 @@ def plot_fft_with_metrics(freqs, mag, fs, sfdr, thd, sinad, enob,
         plt.savefig(out_file, dpi=180)
     if show:
         plt.show()
+
+def plot_dc_linearity_summary(
+    actual_v_run: np.ndarray,
+    adc_v_run: np.ndarray,
+    fit_line_run: np.ndarray,
+    inl_lsb_run: np.ndarray,
+    avg_gain: float,
+    avg_offset_uV: float,
+    avg_max_inl_ppm: float,
+    avg_rms_inl_lsb: float,
+    runs: int,
+    amplitude_vpp: float,
+    steps: int,
+    out_file: str | None = None,
+    show: bool = False,
+):
+    # --- Style constants --------------------------------------------------
+    lw = 1.5           # one place, one value
+    ms = 4             # marker size (points)
+    c_main, c_ideal, c_error = "C0", "gray", "black"
+
+    fig, axs = plt.subplots(
+        2, 1, figsize=(10, 8), sharex=True,
+        gridspec_kw={"hspace": 0.12}, constrained_layout=True
+    )
+
+    # X-axis limits --------------------------------------------------------
+    if actual_v_run.size:
+        xmin, xmax = actual_v_run.min(), actual_v_run.max()
+        pad = 0.05 * (xmax - xmin) if xmax > xmin else 0.1
+        xlim = (xmin - pad, xmax + pad)
+    else:
+        xlim = (-1, 1)
+
+    # ---------------- Transfer plot --------------------------------------
+    ax1 = axs[0]
+    ax1.plot(xlim, xlim, c=c_ideal, ls="--", lw=lw, label="Ideal (y=x)")
+
+    if actual_v_run.size:
+        delta   = adc_v_run - actual_v_run
+        err_lo  = np.where(delta > 0,  delta, 0)
+        err_hi  = np.where(delta < 0, -delta, 0)
+
+        ax1.errorbar(
+            actual_v_run, adc_v_run,
+            yerr=[err_lo, err_hi],
+            fmt="o", ms=ms,
+            ecolor=c_error, elinewidth=lw,
+            color=c_main, capsize=2,
+            label="ADC vs. Ideal"
+        )
+        ax1.plot(actual_v_run, fit_line_run,
+                 c=c_main, lw=lw, label="Best-fit")
+
+    ax1.set_ylabel("ADC Output [V]")
+    ax1.grid(ls=":", lw=0.5, alpha=0.7)
+    ax1.legend(fontsize="small")
+    ax1.set_xlim(xlim)
+    ax1.tick_params(axis="x", labelbottom=False)
+
+    # ---------------- INL plot -------------------------------------------
+    ax2 = axs[1]
+    if inl_lsb_run.size:
+        ax2.plot(
+            actual_v_run, inl_lsb_run,
+            marker="o", linestyle="-",  # <-- same marker as ax1
+            ms=ms, lw=lw, c=c_main, label="INL"
+        )
+
+    ax2.axhline(0, c=c_ideal, ls="--", lw=lw)
+    ax2.set_xlabel("Actual Input [V]")
+    ax2.set_ylabel("INL [LSB]")
+    ax2.grid(ls=":", lw=0.5, alpha=0.7)
+    ax2.legend(fontsize="small")
+    ax2.set_xlim(xlim)
+
+    # ---------------- Title ----------------------------------------------
+    gain_err_pct = (avg_gain - 1) * 100
+    fig.suptitle(
+        f"{runs}-Run DC Linearity ({steps} steps, ±{amplitude_vpp/2:.2f} V)\n"
+        f"Avg Gain {avg_gain:.6f}  (Err {gain_err_pct:+.3f} %)   "
+        f"Avg Offset {avg_offset_uV:.1f} µV   "
+        f"Avg Max|INL| {avg_max_inl_ppm:.2f} ppm   "
+        f"Avg RMS INL {avg_rms_inl_lsb:.3f} LSB",
+        fontsize=12
+    )
+
+    # ---------------- Save / show ----------------------------------------
+    if out_file:
+        plt.savefig(out_file, dpi=300)
+    if show:
+        plt.show()
+    plt.close(fig)

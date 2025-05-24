@@ -1,48 +1,6 @@
 import numpy as np
 import scipy.signal
 from scipy.signal import find_peaks
-from typing import Tuple, List, Optional
-
-# Calculate noise floor metrics: mean, standard deviation, and peak-to-peak.
-# param raw: 1D numpy array of voltage samples
-# return: (mean, std, ptp)
-def compute_noise_floor_metrics(raw):
-    mean = raw.mean()
-    std = raw.std()
-    ptp = np.ptp(raw)
-    return mean, std, ptp
-
-
-def compute_metrics(freqs, mag, k, nh=5):
-    """
-    Parameters
-    ----------
-    freqs : array
-        Frequency bins (Hz) – same length as `mag`
-    mag : array
-        Linear magnitude spectrum (Volts rms)
-    bin_fund : int
-        Index of the fundamental tone
-    num_harmonics : int
-        How many harmonics to include in THD
-    spur_mask : array of bool, optional
-        True → ignore that bin when searching for largest spur (used for
-        suppressing AWG-originating harmonics)
-
-    Returns  (sfdr_dB, thd_dB, sinad_dB, enob_bits)
-    """
-    P1 = mag[k]**2
-    # THD -------------------------------------------------
-    P_harm = sum(mag[h*k]**2 for h in range(2, nh+1) if h*k < len(mag))
-    thd   = 10*np.log10(P_harm/P1) if P_harm else -np.inf
-    # noise+dist (exclude DC & fundamental)
-    mask  = np.ones_like(mag, bool); mask[[0, k]] = False
-    P_nd  = np.sum(mag[mask]**2)
-    sinad = 10*np.log10(P1/P_nd) if P_nd else np.inf
-    enob  = (sinad - 1.76)/6.02
-    # SFDR ----------------------------------------------
-    sfdr  = 20*np.log10(mag[k]/mag[mask].max())
-    return sfdr, thd, sinad, enob
 
 def compute_settling_time(
     raw: np.ndarray,
@@ -144,51 +102,6 @@ def compute_mean_settling_time(
 
     return mean_delta, time_trunc, trace_trunc
 
-def fft_spectrum(raw_data: np.ndarray,
-                 sampling_freq: float,
-                 window: str = 'hann'
-                ) -> tuple[np.ndarray, np.ndarray, float]:
-    """
-    Compute single-sided FFT magnitudes with windowing.
-    Returns (freqs, mags, window_correction).
-    """
-    N = raw_data.size
-    if N == 0:
-        return np.array([]), np.array([]), 1.0
-
-    # select window
-    if window.lower() == 'hann':
-        w = scipy.signal.windows.hann(N, sym=False)
-    else:
-        w = np.ones(N)
-
-    # apply window & compute correction
-    raw_w = raw_data * w
-    corr = N / np.sum(w) if np.sum(w) != 0 else 1.0
-
-    # fft
-    mags = np.abs(np.fft.rfft(raw_w))
-    freqs = np.fft.rfftfreq(N, d=1.0/sampling_freq)
-    return freqs, mags, corr
-
-# Compute DC gain and offset errors from test data.
-# param applied: sequence of nominal voltages applied by SMU
-# param verified: sequence of actual voltages measured by DMM (or None)
-# param adc: sequence of voltages read by the ADC
-# return: dict with keys 'gain', 'offset', and fit R^2
-def compute_dc_gain_offset(applied, verified, adc):
-    # Use the verified values if provided, else use applied
-    x = np.array(verified) if verified[0] is not None else np.array(applied)
-    y = np.array(adc)
-    # Linear fit y = m*x + b
-    m, b = np.polyfit(x, y, 1)
-    # Goodness of fit
-    y_pred = m * x + b
-    ss_res = np.sum((y - y_pred)**2)
-    ss_tot = np.sum((y - np.mean(y))**2)
-    r2 = 1 - ss_res/ss_tot
-    return {'gain': m, 'offset': b, 'r2': r2}
-
 def find_spur_rms(freqs, spectrum, target_freq, span_hz=5e3):
     """
     Locate and return the RMS voltage (in volts) of the spur nearest target_freq.
@@ -220,17 +133,3 @@ def find_spur_rms(freqs, spectrum, target_freq, span_hz=5e3):
     v_peak  = spectrum[peak_idx]
     v_rms   = v_peak / np.sqrt(2)
     return v_rms, freqs[peak_idx]
-
-def compute_bandwidth(freqs, gains, logger):
-    # normalise to the gain plateau – use the median of the first N points
-    N0    = max(3, len(gains)//20)          # ~5 % of the sweep
-    ref   = np.median(gains[:N0])
-    gdB   = 20*np.log10(gains / ref)        # dB w.r.t. pass-band
-    below = np.where(gdB <= -3)[0]
-    if below.size:
-        i     = below[0]
-        f_3dB = np.interp(-3, [gdB[i-1], gdB[i]], [freqs[i-1], freqs[i]])
-        logger.info("-3 dB bandwidth: %.0f Hz", f_3dB)
-        return f_3dB
-    logger.info("-3 dB point not inside sweep range")
-    return None

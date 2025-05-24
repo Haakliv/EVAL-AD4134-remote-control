@@ -10,10 +10,10 @@ import numpy as np
 import time
 from scipy.signal import welch
 import math
-from typing import Tuple, List, Optional
-from pathlib import Path
 from scipy.fft import rfft, rfftfreq
 from scipy.optimize import nnls
+from multimeter import Dmm6500Controller
+
 
 # --- Project-local modules ---------------------------------------------------
 from ace_client import (
@@ -27,10 +27,8 @@ from generator   import WaveformGenerator
 from b2912a_source import B2912A
 from acquisition import capture_samples
 from processing  import (
-    compute_metrics,
     compute_settling_time,
     compute_mean_settling_time,
-    compute_dc_gain_offset,
     find_spur_rms,
 )
 from plotting    import (
@@ -38,13 +36,14 @@ from plotting    import (
     plot_agg_histogram,
     plot_settling_time,
     plot_freq_response,
-    plot_dc_gain,
+    plot_dc_linearity_summary,
 )
 
 # --- Constants & defaults ----------------------------------------------------
 ACE_HOST_DEFAULT  = 'localhost:2357'
 SDG_HOST_DEFAULT  = '172.16.1.56'
 B29_HOST_DEFAULT  = '169.254.5.2'
+DMM_IP_DEFAULT    = '169.254.15.212'
 
 ADC_LSB           = MAX_INPUT_RANGE / (2**(ADC_RES_BITS - 1))
 DEFAULT_STEP_VPP  = MAX_INPUT_RANGE * 0.9
@@ -53,7 +52,7 @@ LOW_PCT = 50.0
 ADC_ODR_CODE_DEFAULT    = 1      # 1.25 MHz
 ADC_FILTER_CODE_DEFAULT = 2      # Sinc6
 
-SAMPLES_DEFAULT      = 131_072
+SAMPLES_DEFAULT      = 131072
 HIST_BINS_DEFAULT    = 1000
 SETTLING_THRESH_FRAC = 0.01
 SWEEP_POINTS_DEFAULT = 50
@@ -61,35 +60,12 @@ SWEEP_POINTS_DEFAULT = 50
 SWITCHING_FREQ = 295400   # Hz, power-supply switching frequency for spur detection
 FILTER_BW_FACTORS = 232630 # Hz  # Sinc6 BW factor (−3 dB) at 1.25MHz ODR for spur integration
 
+DEFAULT_INL_STEPS = 4096          # 2 mV step over 8.192 V span
+DEFAULT_RUNS  = 3
+
 # =============================================================================
 # Helper utilities
 # =============================================================================
-def add_common_adc_args(parser):
-    """ADC-related flags shared by all sub-commands."""
-    parser.add_argument('--ace-host', dest='ace_host', type=str,
-                        default=ACE_HOST_DEFAULT, help='ACE server address')
-    parser.add_argument('--odr-code', type=int, choices=list(SLAVE_ODR_MAP.keys()),
-                        default=ADC_ODR_CODE_DEFAULT,
-                        help=('ADC ODR code (0-13): ' +
-                              ', '.join(f"{c}={r:.0f} Hz"
-                                        for c, r in SLAVE_ODR_MAP.items())))
-    parser.add_argument('--filter-code', type=int,
-                        choices=list(SINC_FILTER_MAP.keys()),
-                        default=ADC_FILTER_CODE_DEFAULT,
-                        help=('ADC filter code (0-4): ' +
-                              ', '.join(f"{c}={name}"
-                                        for c, name in SINC_FILTER_MAP.items())))
-    parser.add_argument('-n', '--samples', type=int, default=SAMPLES_DEFAULT,
-                        help='number of samples to capture')
-    parser.add_argument('--runs', type=int, default=5,
-                        help='number of repeat measurements')
-
-def add_common_plot_args(parser):
-    """Plotting/display flags shared by all sub-commands."""
-    parser.add_argument('--plot', action='store_true', help='save plots to files')
-    parser.add_argument('--show', action='store_true', help='display plots on screen')
-
-# -----------------------------------------------------------------------------
 def load_awg_cal(cal_path, target_freqs, odr_rate):
     """Load AWG baseline PSD and interpolate onto `target_freqs`."""
     cal = np.load(cal_path, allow_pickle=True)
@@ -118,7 +94,7 @@ def run_noise_floor(args, logger, ace):
     welch_sum, stds, raw_runs = None, [], []
     for i in range(1, args.runs + 1):
         raw = capture_samples(
-            ace, args.samples, ADC_LSB, args.odr_code, output_dir=os.getcwd()
+            ace, args.samples, ADC_LSB, output_dir=os.getcwd()
         )
         raw_runs.append(raw)
         mean = np.mean(raw)
@@ -167,31 +143,6 @@ def run_noise_floor(args, logger, ace):
                 out_file='agg_fft.png', show=args.show
             )
 
-# -- AWG baseline PSD capture -------------------------------------------------
-def run_gen_spectrum(args, logger, ace):
-    """Capture AWG-only PSD and store in NPZ for later subtraction."""
-    odr = SLAVE_ODR_MAP[args.odr_code]
-    gen = WaveformGenerator(args.sdg_host)
-    fs_vpp = MAX_INPUT_RANGE * 10 ** (-0.5 / 20)
-    logger.info("Using %.6f Vpp (-0.5 dBFS) instead of %.6f Vpp", fs_vpp, args.amplitude)
-    gen.sine(args.channel, args.freq, fs_vpp, args.offset)
-    logger.info("Capturing AWG baseline PSD: f=%.2f Hz, %.2f Vpp, offset=%.2f V",
-                args.freq, args.amplitude, args.offset)
-
-    acc = None
-    for _ in range(args.runs):
-        raw = capture_samples(
-            ace, args.samples, ADC_LSB, args.odr_code, output_dir=os.getcwd()
-        )
-        f, Pxx = welch(raw, fs=odr,
-                       nperseg=len(raw)//4, noverlap=len(raw)//8)
-        acc = Pxx if acc is None else acc + Pxx
-    Pxx_avg = acc / args.runs
-    np.savez('awg_psd.npz', Pxx=Pxx_avg, freqs=f,
-             meta=dict(fs=odr, f0=args.freq,
-                       amp=args.amplitude, off=args.offset))
-    logger.info("Saved AWG baseline → awg_psd.npz")
-    gen.disable(args.channel)
 
 _DBV  = lambda v: 20*np.log10(v)
 
@@ -668,56 +619,191 @@ def run_freq_response(args, logger, ace):
                              else "step_bode.png"),
                    show=args.show)
 
-# -- DC gain / offset ---------------------------------------------------------
-def run_dc_gain(args, logger, ace):
-    """DC gain/offset linear-fit measurement."""
-    logger.info("DC gain/offset: SMU=%s", args.resource)
-    voltages = args.voltages
-    logger.info("Applying %d DC points (%.3f→%.3f V)",
-                len(voltages), voltages[0], voltages[-1])
+# -- Repeated DC sweep --------------------------------------------------------
+def run_dc_tests(args, logger, ace):
+    """
+    Repeated DC sweep:
+      • SMU drives N points from –amplitude/2 to +amplitude/2
+      • DMM measures true input (10 V range)
+      • ADC is captured and averaged
+      • Gain, offset (in uV) and INL are computed per run and averaged
+      • Progress is logged as [k/N steps]
+    """
+    start_time = time.time()
+    next_time_update = start_time + 300  # every 5 minutes
+
+    # ---------- instruments ----------
+    dmm = Dmm6500Controller(args.dmm_ip)
+    dmm.configure_for_precise_dc(nplc=5, autozero=True, dmm_range=10)
 
     smu = B2912A(args.resource)
-    adc_means, actual_vs = [], []
+    smu.output_on()
 
-    for v in voltages:
-        smu.sweep_voltage(
-            start=v, stop=v, points=1, current_limit=0.01,
-            range_mode='AUTO', trigger_count=1,
-            trigger_delay=0.2, trigger_period=None
-        )
-        smu.smu.query('*OPC?')
+    amplitude = min(args.amplitude, MAX_INPUT_RANGE * 2)
+    v_start, v_stop = -amplitude / 2, +amplitude / 2
 
-        if args.no_board:
-            actual_vs.append(v)
-            continue
+    steps = args.steps or DEFAULT_INL_STEPS
+    runs  = args.runs  or DEFAULT_RUNS
+    sweep_voltages = np.linspace(v_start, v_stop, steps)
 
-        raw = capture_samples(
-            ace, args.samples, ADC_LSB, args.odr_code, output_dir=os.getcwd()
-        )
-        mean_v = np.mean(raw)
-        actual_vs.append(v)
-        adc_means.append(mean_v)
-        logger.info("V_set=%.6f V → ADC_mean=%.6f V", v, mean_v)
+    if not args.no_board:
+        ace.setup_capture(args.samples, args.odr_code)
 
-    smu.close()
+    run_stats = []   # per-run results
+    last_run_plot_data = None
 
-    if args.no_board:
+    try:
+        for run_idx in range(1, runs + 1):
+            logger.info("=== Run %d / %d ===", run_idx, runs)
+            logger.info(
+                "DC sweep: %d steps from %.5f V to %.5f V (%.5f V step)",
+                steps, v_start, v_stop, (v_stop - v_start) / max(steps - 1, 1)
+            )
+
+            actual_v, adc_v = [], []
+
+            for k, v in enumerate(sweep_voltages, 1):
+                now = time.time()
+                if now >= next_time_update or k == steps:
+                    logger.info(
+                        "Progress: step %d/%d (%.3f V)", k, steps, v
+                    )
+                    next_time_update = now + 300
+                smu.set_voltage(v, current_limit=0.01, range_mode=20)
+                smu.smu.query("*OPC?")
+                time.sleep(0.05)
+
+                mean_v, std_v, _ = dmm.measure_voltage_avg(n_avg=10,
+                                                            delay=0.05)
+
+                if args.no_board:
+                    continue
+
+                raw = capture_samples(
+                    ace, args.samples, ADC_LSB, output_dir=os.getcwd()
+                )
+                adc_mean = np.mean(raw)
+
+                logger.debug("DMM %.6f +/- %.2e V   ADC %.6f",
+                             mean_v, std_v, adc_mean)
+
+                actual_v.append(mean_v)
+                adc_v.append(adc_mean)
+
+            if args.no_board:
+                logger.warning("Run %d skipped ADC capture.", run_idx)
+                continue
+
+            # ---------- fit / INL ----------
+            v_arr, a_arr = np.array(actual_v), np.array(adc_v)
+            gain, offset = np.polyfit(v_arr, a_arr, 1)
+            fit          = gain * v_arr + offset
+            resid        = a_arr - fit         # V
+
+            inl_lsb = resid / ADC_LSB
+            inl_ppm = resid / (MAX_INPUT_RANGE * 2) * 1e6
+            max_inl_ppm = np.max(np.abs(inl_ppm))
+
+            offset_uV = offset * 1e6
+
+            run_stats.append(dict(
+                gain=gain,
+                offset_uV=offset_uV,
+                max_inl_ppm=max_inl_ppm,
+                rms_inl_lsb=np.sqrt(np.mean(inl_lsb ** 2))
+            ))
+
+            logger.info("Run %d:  Gain=%.6f  Offset=%.3f uV  "
+                        "Max|INL|=%.2f ppm", run_idx,
+                        gain, offset_uV, max_inl_ppm)
+            
+            if not args.no_board:
+                # Convert lists to numpy arrays if they aren't already
+                current_v_arr = np.array(actual_v)
+                current_a_arr = np.array(adc_v)
+                current_inl_lsb = np.array(inl_lsb) # Assuming inl_lsb is already a numpy array
+
+                last_run_plot_data = {
+                    'actual_v': current_v_arr,
+                    'adc_v': current_a_arr,
+                    'fit_line': gain * current_v_arr + offset, # 'gain' and 'offset' are for this specific run
+                    'inl_lsb': current_inl_lsb,
+                }
+
+    finally:
+        smu.output_off()
+        smu.close()
+
+    # ---------- aggregate ----------
+    if not run_stats:
+        logger.warning("No ADC data captured; analysis skipped.")
         return
 
-    res = compute_dc_gain_offset(actual_vs, None, adc_means)
-    logger.info("Gain=%.6f, Offset=%.6f, R²=%.4f",
-                res['gain'], res['offset'], res['r2'])
+    g  = np.mean([r["gain"]        for r in run_stats])
+    ou = np.mean([r["offset_uV"]   for r in run_stats])
+    ip = np.mean([r["max_inl_ppm"] for r in run_stats])
+    ir = np.mean([r["rms_inl_lsb"] for r in run_stats])
 
-    if args.plot or args.show:
-        plot_dc_gain(
-            actual_vs, adc_means,
-            out_file=args.plot and f"dc_gain_{len(voltages)}.png",
-            show=args.show
+    logger.info("=== Averaged over %d runs ===", len(run_stats))
+    logger.info("Gain          : %.6f  (error %.3f %%)", g, (g - 1) * 100)
+    logger.info("Offset        : %.3f uV", ou)
+    logger.info("Max abs INL   : %.2f ppm of FS", ip)
+    logger.info("RMS INL       : %.3f LSB", ir)
+
+    if run_stats and last_run_plot_data:
+        logger.info("Generating DC linearity summary plot...")            
+        show_plot_flag = getattr(args, 'show_plots', False)
+
+        plot_dc_linearity_summary(
+            actual_v_run=last_run_plot_data['actual_v'],
+            adc_v_run=last_run_plot_data['adc_v'],
+            fit_line_run=last_run_plot_data['fit_line'],
+            inl_lsb_run=last_run_plot_data['inl_lsb'],
+            avg_gain=g,
+            avg_offset_uV=ou,
+            avg_max_inl_ppm=ip,
+            avg_rms_inl_lsb=ir,
+            runs=len(run_stats),
+            amplitude_vpp=amplitude,  # 'amplitude' from run_dc_tests scope
+            steps=steps,              # 'steps' from run_dc_tests scope
+            out_file=(args.plot if isinstance(args.plot, str)
+                             else "dc_plot.png"),   # This will be None if output_directory is not set
+            show=show_plot_flag
         )
+    elif not run_stats:
+        logger.warning("No run statistics available. Skipping DC linearity plot.")
+    elif not last_run_plot_data:
+        logger.warning("No plot data from the last run available. Skipping DC linearity plot.")
+
 
 # =============================================================================
 # Argument-parser construction
 # =============================================================================
+def add_common_adc_args(parser):
+    """ADC-related flags shared by all sub-commands."""
+    parser.add_argument('--ace-host', dest='ace_host', type=str,
+                        default=ACE_HOST_DEFAULT, help='ACE server address')
+    parser.add_argument('--odr-code', type=int, choices=list(SLAVE_ODR_MAP.keys()),
+                        default=ADC_ODR_CODE_DEFAULT,
+                        help=('ADC ODR code (0-13): ' +
+                              ', '.join(f"{c}={r:.0f} Hz"
+                                        for c, r in SLAVE_ODR_MAP.items())))
+    parser.add_argument('--filter-code', type=int,
+                        choices=list(SINC_FILTER_MAP.keys()),
+                        default=ADC_FILTER_CODE_DEFAULT,
+                        help=('ADC filter code (0-4): ' +
+                              ', '.join(f"{c}={name}"
+                                        for c, name in SINC_FILTER_MAP.items())))
+    parser.add_argument('-n', '--samples', type=int, default=SAMPLES_DEFAULT,
+                        help='number of samples to capture')
+    parser.add_argument('--runs', type=int, default=5,
+                        help='number of repeat measurements')
+
+def add_common_plot_args(parser):
+    """Plotting/display flags shared by all sub-commands."""
+    parser.add_argument('--plot', action='store_true', help='save plots to files')
+    parser.add_argument('--show', action='store_true', help='display plots on screen')
+
 def setup_parsers():
     p = argparse.ArgumentParser(description='EVAL-AD4134 test CLI')
     subs = p.add_subparsers(dest='cmd', required=True)
@@ -730,17 +816,6 @@ def setup_parsers():
     nf.add_argument('--hist-bins', type=int, default=HIST_BINS_DEFAULT,
                     help='bins for histogram')
     nf.add_argument('--fft', action='store_true', help='perform FFT')
-
-    # --- AWG baseline capture -----------------------------------------------
-    gs = subs.add_parser('gen-spectrum', help='Capture AWG baseline PSD')
-    gs.add_argument('--sdg-host', dest='sdg_host', type=str,
-                    default=SDG_HOST_DEFAULT, help='SDG address')
-    gs.add_argument('--channel', type=int, choices=[1, 2], default=1,
-                    help='SDG channel')
-    gs.add_argument('--freq', type=float, default=1_000.0, help='sine freq [Hz]')
-    gs.add_argument('--amplitude', type=float, default=1.0, help='Vpp')
-    gs.add_argument('--offset', type=float, default=0.0, help='DC offset [V]')
-    add_common_adc_args(gs)
 
     # --- SFDR / THD / ENOB ---------------------------------------------------
     sf = subs.add_parser('sfdr', help='Dynamic-performance test')
@@ -763,7 +838,6 @@ def setup_parsers():
     add_common_adc_args(sf)
     sf.set_defaults(odr_code=7)
     add_common_plot_args(sf)
-
 
     # --- Settling-time -------------------------------------------------------
     st = subs.add_parser('settling-time', help='Transient settling-time test')
@@ -806,22 +880,28 @@ def setup_parsers():
     add_common_adc_args(fr)
     add_common_plot_args(fr)
 
-    # --- DC gain / offset ----------------------------------------------------
-    dcg = subs.add_parser('dc-gain', help='DC gain & offset test')
-    dcg.add_argument('voltages', nargs='+', type=float,
-                     help='list of DC voltages [V]')
-    dcg.add_argument('--resource', type=str,
+    # --- DC tests ----------------------------------------------------
+    dct = subs.add_parser('dc-test', help='DC measurement test (DMM + Source)')
+    dct.add_argument('--no-board', dest='no_board', action='store_true',
+                    help='Dry-run: skip ADC capture')
+    dct.add_argument('--dmm-ip', type=str, default=DMM_IP_DEFAULT,
+                     help='DMM IP address (default: %s)' % DMM_IP_DEFAULT)
+    dct.add_argument('--resource', type=str,
                      default=f'TCPIP0::{B29_HOST_DEFAULT}::inst0::INSTR',
                      help='B2912A VISA resource')
-    dcg.add_argument('-no-board', dest='no_board', action='store_true',
-                     help='skip ADC capture')
-    add_common_adc_args(dcg)
-    add_common_plot_args(dcg)
+    dct.add_argument('--amplitude', type=float,
+        default=MAX_INPUT_RANGE * 2,
+        help='Total sweep amplitude [V]. Sweep is from -amplitude/2 to +amplitude/2.')
+    dct.add_argument('--steps', type=int,   default=4096,
+                 help='number of voltage points (default≈2 mV step)')
+    dct.set_defaults(runs=1)
+    add_common_adc_args(dct)
+    add_common_plot_args(dct)
 
     return p
 
 # =============================================================================
-# Main entry-point
+# Main
 # =============================================================================
 def main():
     args = setup_parsers().parse_args()
@@ -853,11 +933,10 @@ def main():
 
     # --- Dispatch ------------------------------------------------------------
     if   args.cmd == 'noise-floor':   run_noise_floor(args, logger, ace)
-    elif args.cmd == 'gen-spectrum':  run_gen_spectrum(args, logger, ace)
     elif args.cmd == 'sfdr':          run_sfdr(args, logger, ace)
     elif args.cmd == 'settling-time': run_settling_time(args, logger, ace)
     elif args.cmd == 'freq-response': run_freq_response(args, logger, ace)
-    elif args.cmd == 'dc-gain':       run_dc_gain(args, logger, ace)
+    elif args.cmd == 'dc-test':       run_dc_tests(args, logger, ace)
     else:
         logger.error("Unknown command (use -h for help)")
 

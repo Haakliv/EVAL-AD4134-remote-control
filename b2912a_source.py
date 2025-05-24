@@ -36,59 +36,6 @@ class B2912A:
         self.smu.write(f'SOUR:VOLT:RANG {range_mode}')
         self.smu.write(f'SOUR:VOLT {safe_v}')
 
-    # Perform a voltage sweep on the SMU
-    # param start: Sweep start voltage in volts
-    # param stop: Sweep stop voltage in volts
-    # param points: Number of steps in the sweep (optional)
-    # param step: Step size in volts (optional)
-    # param current_limit: Compliance current in amps
-    # param range_mode: 'AUTO', 'BEST', or 'FIXED'
-    # param trigger_count: Number of sweeps to execute
-    # param trigger_delay: Delay before starting sweep in seconds
-    # param trigger_period: Interval between points in seconds (for TIMER trigger)
-    def sweep_voltage(self,
-                      start: float,
-                      stop: float,
-                      points: int = None,
-                      step: float = None,
-                      current_limit: float = 0.01,
-                      range_mode: str = 'AUTO',
-                      trigger_count: int = 1,
-                      trigger_delay: float = 0.0,
-                      trigger_period: float = None):
-        requested_vpp = abs(stop - start)
-        offset = (start + stop) / 2.0
-
-        safe_vpp = limit_vpp_offset(requested_vpp,
-                                     offset,
-                                     max_input=MAX_INPUT_RANGE)
-
-        safe_start = offset - safe_vpp / 2.0
-        safe_stop  = offset + safe_vpp / 2.0
-
-        self.smu.write('SOUR:FUNC VOLT')
-        self.smu.write(f'SENS:CURR:PROT {current_limit}')
-        self.smu.write(f'SOUR:VOLT:SWE:MODE {range_mode}')
-        self.smu.write(f'SOUR:VOLT:SWE:STAR {safe_start}')
-        self.smu.write(f'SOUR:VOLT:SWE:STOP {safe_stop}')
-
-        if points is not None:
-            self.smu.write(f'SOUR:VOLT:SWE:POIN {points}')
-        elif step is not None:
-            self.smu.write(f'SOUR:VOLT:SWE:STEP {step}')
-        else:
-            raise ValueError('Either points or step must be specified')
-
-        self.smu.write(f'TRIG:COUN {trigger_count}')
-        self.smu.write(f'TRIG:DEL {trigger_delay}')
-        if trigger_period is not None:
-            self.smu.write('TRIG:TYPE TIM')
-            self.smu.write(f'TRIG:TIM {trigger_period}')
-        else:
-            self.smu.write('TRIG:TYPE IMM')
-
-        self.smu.write('INIT')
-
     def output_on(self):
         self.smu.write('OUTP ON')
 
