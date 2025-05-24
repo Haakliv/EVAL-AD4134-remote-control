@@ -1,5 +1,6 @@
 import numpy as np
 import scipy.signal
+from scipy.signal import find_peaks
 from typing import Tuple, List, Optional
 
 # Calculate noise floor metrics: mean, standard deviation, and peak-to-peak.
@@ -12,12 +13,7 @@ def compute_noise_floor_metrics(raw):
     return mean, std, ptp
 
 
-def compute_metrics(freqs: np.ndarray,
-                    mag: np.ndarray,
-                    bin_fund: int,
-                    num_harmonics: int = 5,
-                    spur_mask: Optional[np.ndarray] = None
-                    ) -> Tuple[float, float, float, float]:
+def compute_metrics(freqs, mag, k, nh=5):
     """
     Parameters
     ----------
@@ -35,32 +31,17 @@ def compute_metrics(freqs: np.ndarray,
 
     Returns  (sfdr_dB, thd_dB, sinad_dB, enob_bits)
     """
-    P1 = mag[bin_fund] ** 2                             # fundamental power
-
-    # THD ---------------------------------------------------------------------
-    P_harm = 0.0
-    for n in range(2, num_harmonics + 1):
-        idx = bin_fund * n
-        if idx < len(mag):
-            P_harm += mag[idx] ** 2
-    thd = 10 * np.log10(P_harm / P1) if P_harm > 0 else -np.inf
-
-    # noise + distortion (exclude DC and fundamental)
-    mask = np.ones_like(mag, dtype=bool)
-    mask[0] = False
-    mask[bin_fund] = False
-    if spur_mask is not None:
-        mask &= ~spur_mask
-    P_nd = np.sum(mag[mask] ** 2)
-    sinad = 10 * np.log10(P1 / P_nd) if P_nd > 0 else np.inf
-    enob  = (sinad - 1.76) / 6.02
-
-    # SFDR --------------------------------------------------------------------
-    spur_candidates = mag.copy()
-    spur_candidates[~mask] = 0.0                # suppress bins we ignore
-    max_spur = spur_candidates.max()
-    sfdr = 20 * np.log10(mag[bin_fund] / max_spur) if max_spur > 0 else np.inf
-
+    P1 = mag[k]**2
+    # THD -------------------------------------------------
+    P_harm = sum(mag[h*k]**2 for h in range(2, nh+1) if h*k < len(mag))
+    thd   = 10*np.log10(P_harm/P1) if P_harm else -np.inf
+    # noise+dist (exclude DC & fundamental)
+    mask  = np.ones_like(mag, bool); mask[[0, k]] = False
+    P_nd  = np.sum(mag[mask]**2)
+    sinad = 10*np.log10(P1/P_nd) if P_nd else np.inf
+    enob  = (sinad - 1.76)/6.02
+    # SFDR ----------------------------------------------
+    sfdr  = 20*np.log10(mag[k]/mag[mask].max())
     return sfdr, thd, sinad, enob
 
 def compute_settling_time(

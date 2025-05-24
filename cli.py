@@ -13,7 +13,7 @@ import math
 from typing import Tuple, List, Optional
 from pathlib import Path
 from scipy.fft import rfft, rfftfreq
-from scipy.signal import get_window
+from scipy.optimize import nnls
 
 # --- Project-local modules ---------------------------------------------------
 from ace_client import (
@@ -27,7 +27,6 @@ from generator   import WaveformGenerator
 from b2912a_source import B2912A
 from acquisition import capture_samples
 from processing  import (
-    fft_spectrum,
     compute_metrics,
     compute_settling_time,
     compute_mean_settling_time,
@@ -194,113 +193,265 @@ def run_gen_spectrum(args, logger, ace):
     logger.info("Saved AWG baseline → awg_psd.npz")
     gen.disable(args.channel)
 
-def build_awg_spur_mask(fs: float,
-                        n: int,
-                        f0: float,
-                        spur_bins: List[int],
-                        tol_bins: int = 1,
-                        save_to: Optional[str] = None) -> np.ndarray:
+_DBV  = lambda v: 20*np.log10(v)
+
+def _coherent_bin(fs, f_target, n):
+    k = int(round(f_target*n/fs))
+    return k, k*fs/n
+
+def _capture(ace, samples, odr_code, runs):
+    ace.setup_capture(samples, odr_code)
+    return [capture_samples(ace, samples) for _ in range(runs)]
+
+
+# ------------------------------------------------------------------
+#  Window + helpers (ACE-style BH-7, lobe = ±15 bins)
+# ------------------------------------------------------------------
+def _avg_spectrum(runs, win, wc):
     """
-    spur_bins : list of harmonic ORDERs to ignore (e.g. [2,3,5])
-    tol_bins  : +/- bins around each harmonic line that will be masked out
+    Average                                   Vrms/bin
+      2 * |FFT| / (N * wc) / sqrt(2)
+    and print the fundamental power of each run.
     """
-    mask = np.zeros(n//2 + 1, dtype=bool)
-    fud_bin = int(round(f0 * n / fs))
-    for h in spur_bins:
-        idx = h * fud_bin
-        if idx < len(mask):
-            mask[max(0, idx - tol_bins): idx + tol_bins + 1] = True
-    if save_to:
-        np.save(save_to, mask)
-    return mask
+    n   = len(win)
+    acc = None
+    for idx, raw in enumerate(runs, 1):
+        spec = rfft(raw * win)
+        mag  = 2 * np.abs(spec) / (n * wc) / np.sqrt(2)
+        print("run %-2d  fund = %+.2f dBV" % (idx, _DBV(mag.max())))
+        acc  = mag if acc is None else acc + mag
+    return acc / len(runs)
 
-def coherent_frequency(f_target: float, fs: float, n: int) -> Tuple[float, int]:
-    bin_idx = int(round(f_target * n / fs))
-    f_coh   = bin_idx * fs / n
-    return f_coh, bin_idx
+def _paint_lobe(vec, center, width, value):
+    lo = max(0, center - width)
+    hi = min(len(vec), center + width + 1)
+    vec[lo:hi] = value
 
-# -- SFDR / THD / ENOB --------------------------------------------------------
-def run_sfdr(args, logger, ace):
+def _correct_harmonics(mag_lvls, k, H, gen_vpp, main=15, keep=3, eps=1e-12):
     """
-    Improved dynamic-performance test.
-
-    Required args:
-      freq            – desired fundamental frequency (Hz)
-      amplitude       – differential Vpp
-      offset          – common-mode offset (V)
-      samples         – capture size (max 131_072)
-      runs            – number of captures to average
-      odr_code        – index into SLAVE_ODR_MAP
-      filter_code     – index into SINC_FILTER_MAP
-      sdg_host        – IP/hostname of function generator
-      channel         – AWG channel (positive leg)
-      spur_mask_file  – .npy file with pre-built AWG spur mask (optional)
-      plot / show     – flags, unchanged from your framework
+    Robust generator-harmonic removal:
+    * keep   = number of loudest sweep points to keep in the fit
+    * main   = ±bins written after correction (BH-7 main-lobe = 15)
     """
-    fs   = SLAVE_ODR_MAP[args.odr_code]
-    n    = args.samples
+    adc_vpp = np.array([m[k] * 2 * np.sqrt(2) for m in mag_lvls])
+    base    = mag_lvls[0].copy()
 
-    # ------------------------------------------------------------------ source
-    gen  = WaveformGenerator(args.sdg_host)
+    for h in range(2, H + 1):
+        bin_h = h * k
+        if bin_h >= len(base):
+            break
 
-    # Coherent tone -----------------------------------------------------------
-    f_coh, bin_fund = coherent_frequency(args.freq, fs, n)
-    if abs(f_coh - args.freq) / args.freq > 1e-4:     # ~0.01 % tolerance
-        logger.info("Adjusted to coherent f = %.6f Hz (bin %d)", f_coh, bin_fund)
-    else:
-        logger.info("Using requested f = %.6f Hz (bin %d)", f_coh, bin_fund)
+        # ---- gather data -------------------------------------------------
+        y_all = np.array([m[bin_h] for m in mag_lvls])
+        idx   = np.argsort(y_all)[-keep:]          # loudest points
+        y     = y_all[idx]
+        X     = np.column_stack([gen_vpp[idx], adc_vpp[idx] ** h])
 
-    # amplitude: keep –0.5 dBFS like the datasheet
-    gen.sine_diff(f_coh, args.amplitude, args.offset)
+        # ---- NNLS fit on loud points ------------------------------------
+        coef, _ = nnls(X, y)
+        Gc, Dc  = coef
 
-    # Optional spur mask ------------------------------------------------------
-    spur_mask = None
-    if getattr(args, "spur_mask_file", None) and Path(args.spur_mask_file).is_file():
-        spur_mask = np.load(args.spur_mask_file)
+        MIN_DC = 1e-9          # ≈ –180 dBV for H4, totally inaudible
 
-    # Capture loop ------------------------------------------------------------
-    win  = get_window("hann", n)
-    wc   = win.sum() / n                    # amplitude correction factor
-    acc  = None
+        Dc = max(Dc, MIN_DC)
+
+
+        # Cap generator part so we never subtract more than the measurement
+        gen_part = min(Gc * gen_vpp[0], y_all[0])
+        adc_part = Dc * adc_vpp[0] ** h
+        corrected = max(y_all[0] - gen_part + adc_part, adc_part, eps)
+
+        corr = y_all[0] - gen_part + Dc * adc_vpp[0]**h
+        corr = max(corr, eps)
+        _paint_lobe(base, bin_h, MAIN, corr)
+
+        # ---- verbose debug ----------------------------------------------
+        print("-" * 60)
+        print(f"H{h}  bin {bin_h}")
+        print("  y_all :", " ".join(f"{v:.3e}" for v in y_all))
+        print("  kept  :", idx.tolist())
+        print("  Gc    : %.3e   Dc : %.3e" % (Gc, Dc))
+        print("  gen   : %.3e   adc: %.3e   write: %.3e"
+              % (gen_part, adc_part, corrected))
+    return base
+
+def _window(n):
+    a = [0.2712203606, 0.4334446123, 0.21800412,
+         0.0657853433, 0.0107618673, 0.0007700125,
+         0.0000136809]
+    k = np.arange(n)
+    win = sum(a[m] * np.cos(2*np.pi*m*(k - n/2) / n) for m in range(7))
+    wc   = win.sum() / n          # amplitude loss factor
+    MAIN = 15                     # ACE: fundamental / spur guard ±15 bins
+    return win, wc, MAIN
+
+# ------------------------------------------------------------
+
+def run_sfdr_single(args, logger, ace):
+    """
+    One-shot FFT with no harmonic correction.
+    Keeps the same signature so you can swap it in/out.
+    """
+    fs       = SLAVE_ODR_MAP[args.odr_code]
+    n        = args.samples
+    k, f_coh = _coherent_bin(fs, args.freq, n)
+    coh      = abs(f_coh-args.freq) < 1e-12
+    w, wc, enl, MAIN = _window(n)
+    freqs    = rfftfreq(n, 1/fs)
+    pbw_hz   = 0.1861*fs                      # datasheet pass-band
+
+    # --- tone amplitude (single) ------------------------------------
+    vpp_fs   = 2*4.096                        # ±4.096 V diff range
+    vpp_diff = args.amplitude                 # use exactly what you give
+    gen      = WaveformGenerator(args.sdg_host)
+    gen.sine_diff(f_coh, vpp_diff/2, args.offset)
+    gen.sdg.enable_output(1); gen.sdg.enable_output(2)
+    logger.info("Tone: %.2f Hz, %.2f Vpp-diff (%.2f dBFS)",
+                f_coh, vpp_diff, _DBV(vpp_diff/vpp_fs))
+
+    # --- capture ----------------------------------------------------
+    if args.no_board:
+        logger.warning("--no-board was set; nothing to capture.")
+        return None, None, None, None
 
     ace.setup_capture(n, args.odr_code)
+    raw   = capture_samples(ace, n)           # volts, differential already
+    spec = np.fft.rfft(raw * w)
+    mag  = 2 * np.abs(spec) / (n * wc) / np.sqrt(2)   # Vrms/bin
+    # --- metrics ----------------------------------------------------
+    mask = np.ones_like(mag, bool)
+    mask[:10] = False          # ← **ACE: “DC Bins = 10”**
+    def _clear(center):
+        mask[max(0, center-MAIN):center+MAIN+1] = False
+    mask[0] = False; _clear(k)
+    for h in range(2,6):
+        bin_h = h*k
+        if bin_h < len(mask): _clear(bin_h)
+    mask &= freqs <= pbw_hz
 
-    for i in range(1, args.runs + 1):
-        raw = capture_samples(
-            ace, n, ADC_LSB, args.odr_code, output_dir=os.getcwd()
-        )
+    P1   = (mag[k-MAIN:k+MAIN+1]**2).sum()
+    fund = np.sqrt(P1)
+    Ph   = sum((mag[h*k-MAIN:h*k+MAIN+1]**2).sum()
+               for h in range(2,6) if h*k < len(mag))
+    thd  = 10*np.log10(Ph/P1) if Ph>0 else -np.inf
+    spur = mag[mask].max()
+    sfdr = 20*np.log10(fund/spur)
+    Pnd  = (mag[mask]**2).sum()
+    sinad = 10*np.log10(P1/Pnd)
+    enob  = (sinad-1.76)/6.02
 
-        # window, FFT, magnitude (rms)
-        spec = rfft(raw * win)
-        mag  = np.abs(spec) / (n/2 * wc)    # 0 dBFS = full-scale sine rms
-
-        acc = mag if acc is None else acc + mag
-        logger.debug("Run %d complete", i)
-
-    mag_avg = acc / args.runs
-    freqs   = rfftfreq(n, 1/fs)
-
-    # Apply optional AWG baseline in magnitude (Volts rms) --------------------
-    if getattr(args, "awg_cal", None) and Path(args.awg_cal).is_file():
-        with np.load(args.awg_cal) as z:
-            awg_mag = z["Pxx"] ** 0.5 * (fs / 2)**0.5   # saved as PSD → convert
-            mag_avg = np.clip(mag_avg - awg_mag, 0, None)
-        logger.info("AWG baseline ( %s ) subtracted", args.awg_cal)
-
-    # Metrics -----------------------------------------------------------------
-    sfdr, thd, sinad, enob = compute_metrics(
-        freqs, mag_avg, bin_fund, spur_mask=spur_mask
-    )
-    logger.info("SFDR = %.2f dB,  THD = %.2f dB,  SINAD = %.2f dB,  ENOB = %.2f bits",
+    logger.info("SFDR %.2f dB, THD %.2f dB, SINAD %.2f dB, ENOB %.2f bits",
                 sfdr, thd, sinad, enob)
 
-    # Optional plots / saving remain exactly as in your original code ---------
+    # optional plot
     if args.plot or args.show:
-        from plotting import plot_fft_with_metrics   # <- whatever you use
-        plot_fft_with_metrics(freqs, mag_avg, fs, sfdr, thd, sinad, enob,
-                              out_file="sfdr_avg_fft.png", show=args.show)
+        from plotting import plot_fft_with_metrics
+        plot_fft_with_metrics(freqs, mag, fs,
+                              sfdr, thd, sinad, enob,
+                              out_file="sfdr_single_fft.png",
+                              show=args.show)
 
-    gen.disable(args.channel)
+    gen.disable(1); gen.disable(2)
+    return sfdr, thd, sinad, enob
+
+MAIN = 15                # ±15 bins for BH-7 lobe
+KEEP = 3                 # use only K loudest sweep points in the fit
+
+
+def _metrics(freqs, mag, k, passband_hz, H=5, dc_bins=10):
+    mask = np.ones_like(mag, bool)
+    mask[:dc_bins] = False                           # DC guard
+
+    # fundamental
+    mask[max(0, k-MAIN):k+MAIN+1] = False
+
+    # exclude H2..Hn lobes from spur search  (datasheet SFDR)
+    for h in range(2, int(H)+1):
+        bin_h = h*k
+        mask[max(0, bin_h-MAIN):bin_h+MAIN+1] = False
+
+    # stay inside pass-band
+    mask &= freqs <= passband_hz
+
+    P1   = (mag[k-MAIN:k+MAIN+1]**2).sum()
+    fund = np.sqrt(P1)
+    spur = mag[mask].max()
+    sfdr = 20*np.log10(fund/spur)
+
+    # THD keeps harmonic power (unchanged)
+    Ph = sum((mag[h*k-MAIN:h*k+MAIN+1]**2).sum()
+             for h in range(2, int(H)+1) if h*k < len(mag))
+    thd = 10*np.log10(Ph/P1) if Ph>0 else -np.inf
+
+    Pnd = (mag[mask]**2).sum()
+    sinad = 10*np.log10(P1/Pnd)
+    enob  = (sinad-1.76)/6.02
+    return sfdr, thd, sinad, enob
+
+# -------------------------------------------------------------------------
+# Main entry point
+# -------------------------------------------------------------------------
+
+def run_sfdr(args, logger, ace):
+    fs   = SLAVE_ODR_MAP[args.odr_code]
+    n    = args.samples
+    k, f_coh = _coherent_bin(fs, args.freq, n)
+
+    win, wc, MAIN = _window(n)
+    freqs   = rfftfreq(n, 1 / fs)
+    pb_hz   = 0.1861 * fs
+    HMAX    = getattr(args, "num_harmonics", 5)
+
+    # ---------- amplitude sweep set-up ----------
+    vpp_fs   = 2 * 4.096
+    vpp_diff = args.amplitude or 0.995 * vpp_fs
+    scales   = [float(s) for s in getattr(args, "levels",
+                                          "1,0.5").split(",")]
+    gen_vpp  = vpp_diff * np.array(scales)
+
+    # ---------- generator ----------
+    gen = WaveformGenerator(args.sdg_host)
+    gen.sine_diff(f_coh, vpp_diff / 2, args.offset)
+    gen.sdg.enable_output(1); gen.sdg.enable_output(2)
+    logger.info("Signal %.3f Hz, %.2f Vpp-diff (%.2f dBFS)",
+                f_coh, vpp_diff, _DBV(vpp_diff / vpp_fs))
+
+    # ---------- acquisition ----------
+    spectra = []
+    for idx, s in enumerate(scales, 1):
+        for ch in (1, 2):
+            gen.sdg.set_amplitude(vpp_diff * s / 2, ch)
+        if not args.no_board:
+            runs = _capture(ace, n, args.odr_code, args.runs)
+            spectra.append(_avg_spectrum(runs, win, wc))
+        time.sleep(0.4)
+
+    if args.no_board:
+        gen.disable(1); gen.disable(2)
+        return None, None, None, None
+
+    # ---------- de-embed generator ----------
+    mag_corr = _correct_harmonics(spectra, k, HMAX, gen_vpp)
+    mag_corr = np.maximum(mag_corr, 1e-20)       # floor
+
+    # ---------- metrics ----------
+    sfdr, thd, sinad, enob = _metrics(freqs, mag_corr, k, MAIN, pb_hz, HMAX)
+    logger.info("SFDR %.2f dB, THD %.2f dB, SINAD %.2f dB, ENOB %.2f bits",
+                sfdr, thd, sinad, enob)
+
+    # ---------- optional plot ----------
+    if args.plot or args.show:
+        from plotting import plot_fft_with_metrics
+        plot_fft_with_metrics(freqs, mag_corr, fs,
+                              sfdr, thd, sinad, enob,
+                              out_file="sfdr_fft.png", show=args.show)
+
+    gen.disable(1); gen.disable(2)
+    print("="*58)
+    print("RESULTS  SFDR:%7.2f dB   THD:%8.2f dB   SINAD:%7.2f dB   ENOB:%5.2f bits"
+        % (sfdr, thd, sinad, enob))
+    print("="*58)
+
     return sfdr, thd, sinad, enob
 
 # -- Settling‑time ------------------------------------------------------------
@@ -604,9 +755,15 @@ def setup_parsers():
                     help='skip ADC capture')
     sf.add_argument('--awg-cal', type=str,
                     help='NPZ file with AWG baseline PSD (from gen-spectrum)')
+    sf.add_argument('--levels', type=str, default="1,0.5,0.25,0.125",
+                    help='comma-separated amplitude scale factors for THD (default: "1,0.5,0.25,0.125")')
+    sf.add_argument('--num-harmonics', type=int, default=5,
+                    help='number of harmonics for THD (default: 5)')
+
     add_common_adc_args(sf)
     sf.set_defaults(odr_code=7)
     add_common_plot_args(sf)
+
 
     # --- Settling-time -------------------------------------------------------
     st = subs.add_parser('settling-time', help='Transient settling-time test')

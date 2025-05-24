@@ -309,3 +309,46 @@ def plot_agg_fft(freqs, mags, runs, odr, filt,
         plt.savefig(out_file, dpi=300)
     if show:
         plt.show()
+
+def plot_fft_with_metrics(freqs, mag, fs, sfdr, thd, sinad, enob,
+                         out_file=None, show=False, hmax=5, fund_bin=None):
+    import matplotlib.pyplot as plt
+
+    # dB scale, with dB_ref=1 Vrms
+    mag_db = 20 * np.log10(np.maximum(mag, np.finfo(float).tiny))
+    f_khz  = freqs / 1e3
+
+    fig, ax = plt.subplots(figsize=(9, 4))
+    ax.plot(f_khz, mag_db, lw=0.9, label="Corrected spectrum")
+    ax.set_xlabel("Frequency [kHz]")
+    ax.set_ylabel("Magnitude [dBV]")
+    ax.set_title(
+        f"FFT, SFDR={sfdr:.2f} dB, THD={thd:.2f} dB, "
+        f"SINAD={sinad:.2f} dB, ENOB={enob:.2f} bits"
+    )
+
+    # Fundamental and harmonics
+    if fund_bin is not None:
+        k = fund_bin
+    else:
+        # Guess from peak
+        k = np.argmax(mag)
+    bins = [k * h for h in range(1, hmax + 1) if k * h < len(mag)]
+    for h, idx in enumerate(bins, 1):
+        ax.annotate(
+            f"H{h}",
+            xy=(freqs[idx]/1e3, mag_db[idx]),
+            xytext=(0, 12),
+            textcoords='offset points',
+            ha='center', color='C1' if h == 1 else 'C2',
+            fontsize=8,
+            arrowprops=dict(arrowstyle="->", color='C1' if h == 1 else 'C2')
+        )
+
+    ax.grid(True, which="both", linestyle="--", alpha=0.5)
+    ax.legend(loc='best', fontsize=8)
+    plt.tight_layout()
+    if out_file:
+        plt.savefig(out_file, dpi=180)
+    if show:
+        plt.show()
