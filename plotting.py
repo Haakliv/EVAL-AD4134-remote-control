@@ -242,48 +242,71 @@ def plot_agg_fft(freqs, mags, runs, odr, filt,
     if show:
         plt.show()
 
-def plot_fft_with_metrics(freqs, mag, fs, sfdr, thd, sinad, enob,
-                         out_file=None, show=False, hmax=5, fund_bin=None):
-    import matplotlib.pyplot as plt
+def plot_fft_with_metrics(
+    freqs,
+    mag,
+    fs,
+    sfdr,
+    thd,
+    sinad,
+    enob,
+    runs: int,
+    tone_freq: float,
+    amplitude_vpp: float,
+    filt: str,
+    out_file: str | None = None,
+    show: bool = False,
+    xlim: tuple[float, float] | None = None,
+):
+    """
+    FFT spectrum with SFDR / THD / SINAD / ENOB metrics.
+    Title style is consistent with the other plot_* helpers.
 
-    # dB scale, with dB_ref=1 Vrms
-    mag_db = 20 * np.log10(np.maximum(mag, np.finfo(float).tiny))
-    f_khz  = freqs / 1e3
+    Parameters
+    ----------
+    freqs, mag     : FFT result vectors (Hz, Vrms/bin)
+    fs             : sample rate (Hz)
+    sfdr, thd, sinad, enob : already-computed figures
+    runs           : number of averaged captures
+    tone_freq      : stimulus tone frequency (Hz)
+    amplitude_vpp  : differential drive level (Vpp) – shown for context
+    filt           : filter name (e.g. 'Sinc6')
+    out_file, show : as usual
+    xlim           : (xmin_kHz, xmax_kHz) for the plot; values in kHz
+    """
+    # dB scale, referenced to 1 Vrms
+    mag_db = 20.0 * np.log10(np.maximum(mag, np.finfo(float).tiny))
+    f_khz  = freqs / 1e3          # x-axis in kHz
 
     fig, ax = plt.subplots(figsize=(9, 4))
-    ax.plot(f_khz, mag_db, lw=0.9, label="Corrected spectrum")
+    ax.plot(f_khz, mag_db, lw=0.9, label="Averaged spectrum")
+
     ax.set_xlabel("Frequency [kHz]")
     ax.set_ylabel("Magnitude [dBV]")
-    ax.set_title(
-        f"FFT, SFDR={sfdr:.2f} dB, THD={thd:.2f} dB, "
+
+    title_main = (
+        f"{runs}-run FFT Spectrum\n"
+        f"@ {tone_freq:.1f} Hz, {amplitude_vpp:.2f} Vpp, "
+        f"{filt} - ODR {fs/1e6:.2f} MHz"
+    )
+    title_metrics = (
+        f"SFDR={sfdr:.2f} dB, THD={thd:.2f} dB, "
         f"SINAD={sinad:.2f} dB, ENOB={enob:.2f} bits"
     )
+    ax.set_title(f"{title_main}\n{title_metrics}")
 
-    # Fundamental and harmonics
-    if fund_bin is not None:
-        k = fund_bin
-    else:
-        # Guess from peak
-        k = np.argmax(mag)
-    bins = [k * h for h in range(1, hmax + 1) if k * h < len(mag)]
-    for h, idx in enumerate(bins, 1):
-        ax.annotate(
-            f"H{h}",
-            xy=(freqs[idx]/1e3, mag_db[idx]),
-            xytext=(0, 12),
-            textcoords='offset points',
-            ha='center', color='C1' if h == 1 else 'C2',
-            fontsize=8,
-            arrowprops=dict(arrowstyle="->", color='C1' if h == 1 else 'C2')
-        )
+    ax.grid(True, which="both", linestyle="--", linewidth=0.5, alpha=0.5)
+    ax.legend(loc="best", fontsize="small")
 
-    ax.grid(True, which="both", linestyle="--", alpha=0.5)
-    ax.legend(loc='best', fontsize=8)
+    if xlim is not None:
+        ax.set_xlim(*xlim)        # values already in kHz
+
     plt.tight_layout()
     if out_file:
-        plt.savefig(out_file, dpi=180)
+        plt.savefig(out_file, dpi=300)
     if show:
         plt.show()
+    plt.close(fig)
 
 def plot_dc_linearity_summary(
     actual_v_run: np.ndarray,
