@@ -3,40 +3,13 @@ import sys
 import time
 import socket
 import datetime
-import glob
+import clr
+import AnalogDevices.Csa.Remoting.Clients as ClientsModule
+from common import SINC_FILTER_MAP, MAX_INPUT_RANGE
 
 # Add ACE Remote Control client library path
 sys.path.append(r"C:\Program Files (x86)\Analog Devices\ACE\Client")
-import clr
 clr.AddReference('AnalogDevices.Csa.Remoting.Clients')
-import AnalogDevices.Csa.Remoting.Clients as adrc
-
-# Hardware-specific mappings for AD4134:
-SLAVE_ODR_MAP = {
-    0: 1_449_275.0,      # 1.449275 MHz
-    1: 1_250_000.0,      # 1.25 MHz
-    2: 1_123_596.0,      # 1.123596 MHz
-    3: 800_000.0,        # 800 kHz
-    4: 751_880.0,        # 751.88 kHz
-    5: 645_161.0,        # 645.161 kHz
-    6: 600_000.0,        # 600 kHz
-    7: 363_636.0,        # 363.636 kHz
-    8: 320_513.0,        # 320.513 kHz
-    9: 250_000.0,        # 250 kHz
-    10: 100_000.0,       # 100 kHz
-    11: 50_000.0,        # 50 kHz
-    12: 10_000.0,        # 10 kHz
-    13: 1_000.0,         # 1 kHz
-}
-
-SINC_FILTER_MAP = {
-    0: 'Sinc3',
-    1: 'Sinc3 50Hz & 60Hz Rejection',
-    2: 'Sinc6',
-    3: 'Wideband01',
-    4: 'Wideband04',
-}
-
 
 # UI & context paths for AD4134
 UI_ROOT     = r"Root::System"
@@ -49,8 +22,6 @@ CTX_DRIVER   = CTX_BOARD + r"\\AD4134"
 CTX_ANALYSIS = CTX_DRIVER + r"\\AD4134 Analysis"
 
 ACE_PLUGIN = 'AD4134 Eval Board'
-ADC_RES_BITS    = 24     # 24-bit ADC resolution
-MAX_INPUT_RANGE = 4.096  # ±4.096 V input range of AD4134
 
 
 # Ensure that requested peak-to-peak voltage and offset do not exceed input range.
@@ -80,7 +51,7 @@ def _measurement_folder():
 class ACEClient:
     def __init__(self, host='localhost:2357'):
         print(f"Connecting to ACE server at {host}...")
-        mgr = adrc.ClientManager.Create()
+        mgr = ClientsModule.ClientManager.Create()
         self.client = mgr.CreateRequestClient(host)
         print(f"Connected to ACE server, initializing board...")
         # Initialize board
@@ -96,16 +67,13 @@ class ACEClient:
         self.client.Run('@Initialization()')
         self.client.Run('@GetStatusFromBoard()')
 
-    # Return the ACE server's IP address.
-    def get_local_ip(self):
+    @staticmethod
+    def get_local_ip():
         return socket.gethostbyname(socket.gethostname())
 
     # Configure the ADC board with filter, data format, and power-down channels.
-    # param filter_code: ADC filter code (0-4)
-    # param disable_channels: CSV of channel indices to power down
     def configure_board(self, filter_code: int = 2, disable_channels='0,2,3'):
         print(f"Configuring board with filter {SINC_FILTER_MAP[filter_code]}")
-        # filter_code is passed directly
         code = str(filter_code)
         disabled = [ch.strip() for ch in disable_channels.split(',') if ch.strip() != '']
         all_channels = ['0', '1', '2', '3']
@@ -141,10 +109,6 @@ class ACEClient:
         )
 
     # Perform an asynchronous raw data capture to a binary file.
-    # param sample_count: number of samples to capture
-    # param odr_code: desired output data rate in Hz
-    # param timeout_ms: timeout in milliseconds
-    # return: path to the binary output file
     def capture(self, sample_count, timeout_ms=10000):
         # Create output folder & filename
         folder = _measurement_folder()

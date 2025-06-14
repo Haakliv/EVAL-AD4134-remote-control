@@ -22,21 +22,17 @@ class WaveformGenerator:
         self.sdg.set_offset(offset, 1)
         self.sdg.set_offset(offset, 2)
 
-    # Disable output on the specified channel
     def disable(self, channel):
         self.sdg.disable_output(channel)
 
     def enable(self, channel):
         self.sdg.enable_output(channel)
 
-    # ------------------------------------------------------------------
-    # Differential pulse: CH1 normal, CH2 inverted, outputs enabled last
-    # ------------------------------------------------------------------
     def pulse_diff(
         self,
         frequency: float,
         amplitude: float,
-        low_pct: float = 80.0,     # 4 ms low, 1 ms high at 200 Hz
+        low_pct: float = 80.0, # 4 ms low, 1 ms high at 200 Hz
         edge_time: float = 2e-9,
         ch_pos: int = 1,
         ch_neg: int = 2,
@@ -52,19 +48,16 @@ class WaveformGenerator:
             self.sdg.set_frequency(frequency, ch)
             self.sdg.set_amplitude(safe_vpp, ch)
 
-            # correct 50 Ω load, error in library
+            # 50 ohm load
             self.sdg.interface.write(f"C{ch}:OUTP LOAD,50")
 
-            # pulse specifics
             self.sdg.interface.write(f"C{ch}:BSWV DUTY,{high_pct}")
             self.sdg.interface.write(f"C{ch}:BSWV DLY,0")
             self.sdg.interface.write(f"C{ch}:BSWV RISE,{edge_time}")
             self.sdg.interface.write(f"C{ch}:BSWV FALL,{edge_time}")
 
-        # invert negative leg before outputs go ON
         self.sdg.interface.write(f"C{ch_neg}:OUTP PLRT,INVT")
 
-        # enable outputs
         self.sdg.enable_output(ch_pos)
         self.sdg.enable_output(ch_neg)
 
@@ -74,22 +67,16 @@ class WaveformGenerator:
                   offset: float,
                   ch_pos: int = 1,
                   ch_neg: int = 2):
-        """
-        Differential sine: CH1 = +1/2Vpp, CH2 = -1/2Vpp, both with common-mode offset.
-        """
         max_in = MAX_INPUT_RANGE*2
-        # clamp offset
         if abs(offset) > max_in:
             offset = max_in if offset > 0 else -max_in
 
-        # limit total headroom
         safe_vpp = limit_vpp_offset(amplitude, offset)
         if safe_vpp <= 0:
             raise ValueError(
                 f"Offset={offset} V leaves no headroom for Vpp={amplitude} V"
             )
 
-        # CH1: normal sine
         self.sdg.set_frequency(frequency, ch_pos)
         self.sdg.set_frequency(frequency, ch_neg)
         self.sdg.set_amplitude(safe_vpp, ch_pos)

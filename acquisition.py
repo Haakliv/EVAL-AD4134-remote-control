@@ -1,17 +1,11 @@
 import numpy as np
-from ace_client import ADC_RES_BITS, MAX_INPUT_RANGE
 import os
 import time
 import shutil
-
-ADC_SCALE = MAX_INPUT_RANGE / (2 ** (ADC_RES_BITS - 1))  # LSB weight for ±4.096 V input range
+from common import ADC_SCALE
 
 # Read raw binary samples from the AD4134 capture file and convert to scaled voltages.
-# param bin_file: Path to the .bin file containing raw 3-byte samples
-# param scale: Multiplicative scale factor (e.g. LSB weight)
-# return: 1D numpy array of float voltages
 def read_raw_samples(bin_file, scale=ADC_SCALE):
-    # Wait for file to exist (with a timeout)
     deadline = time.time() + 5.0
     while time.time() < deadline and not os.path.isfile(bin_file):
         time.sleep(0.1)
@@ -41,14 +35,6 @@ def read_raw_samples(bin_file, scale=ADC_SCALE):
 
 
 # Configure ADC board and perform capture, and return scaled samples.
-# param ace_host: Address of ACE remote control server
-# param sample_count: Number of samples to capture
-# param scale: LSB-to-voltage scale factor
-# param odr_code: Output data rate code (0–13)
-# param filter_code: ADC filter code (0–4)
-# param disable_channels: CSV list of channels to power-down
-# param timeout_ms: Capture timeout in milliseconds
-# return: numpy array of voltage samples
 def capture_samples(
     ace_client,
     sample_count: int = 131072,

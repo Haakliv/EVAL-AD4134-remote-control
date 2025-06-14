@@ -7,31 +7,16 @@ class Dmm6500Controller:
         self.dmm = Dmm6500(ip_address, timeout_sec)
         self.configure_for_precise_dc()
 
-    def configure_for_precise_dc(self, *, nplc=5, autozero=True,
-                                dmm_range=10, rear_terminals=True):
-        """
-        High-accuracy DC-voltage setup for INL / DC-linearity work.
-
-        Parameters
-        ----------
-        nplc          : integration time in power-line cycles (5 PLC ≈ 100 ms @ 50 Hz).
-                        5 PLC gives ~60 dB NMRR on the 6500 family :contentReference[oaicite:0]{index=0}
-        autozero      : enable AZER to remove internal drift between points.
-        dmm_range     : fixed range in volts. Choose the *lowest* range that
-                        never clips your sweep (disable autoranging!).
-        rear_terminals: True ⇒ use the guarded rear inputs for the best thermal
-                        stability and lead management.
-        """
-
+    def configure_for_precise_dc(self, *, nplc=5,
+                                dmm_range=10):
         self.dmm.interface.write(":SENS:FUNC 'VOLT:DC'")
         self.dmm.interface.write(f":SENS:VOLT:DC:RANG {dmm_range}")
         self.dmm.interface.write(f":SENS:VOLT:DC:NPLC {nplc}")
         self.dmm.interface.write(":SENS:VOLT:DC:AZER ON")
 
-        self.dmm.interface.write(":SENS:VOLT:DC:AVER:STAT OFF") # disable averaging    
+        self.dmm.interface.write(":SENS:VOLT:DC:AVER:STAT OFF") # Disable averaging    
 
     def measure_voltage_avg(self, n_avg=10, delay=0.05):
-        """Average n_avg voltage readings, with a delay between reads."""
         vals = []
         for _ in range(n_avg):
             v = self.dmm.measure_voltage_dc()
@@ -42,15 +27,12 @@ class Dmm6500Controller:
         return mean, std, vals
     
     def measure_voltage_dc(self):
-        """Take a single DC voltage measurement from the DMM."""
         return self.dmm.interface.query(":MEAS:VOLT:DC?")
-
 
     def set_message(self, line1, line2=""):
         self.dmm.set_custom_message(line1, line2)
 
     def write(self, command: str):
-        """Send a raw SCPI command to the DMM."""
         self.dmm.interface.write(command)
 
 if __name__ == '__main__':
