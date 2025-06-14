@@ -123,7 +123,7 @@ def run_noise_floor(args, logger, ace):
         spur_rms_v, spur_freq = find_spur_rms(f, mag_avg, SWITCHING_FREQ, span_hz=10e3)
         spur_uvrms = spur_rms_v * 1e6
         logger.info(
-            "Power-supply spur RMS @ %.1f kHz: %.3f µVrms",
+            "Power-supply spur RMS @ %.1f kHz: %.3f uVrms",
             spur_freq/1e3, spur_uvrms
         )
     except ValueError as e:
@@ -619,161 +619,218 @@ def run_freq_response(args, logger, ace):
                              else "step_bode.png"),
                    show=args.show)
 
-# -- Repeated DC sweep --------------------------------------------------------
 def run_dc_tests(args, logger, ace):
     """
-    Repeated DC sweep:
-      • SMU drives N points from –amplitude/2 to +amplitude/2
-      • DMM measures true input (10 V range)
-      • ADC is captured and averaged
-      • Gain, offset (in uV) and INL are computed per run and averaged
-      • Progress is logged as [k/N steps]
+    Repeated DC sweep – two use-cases, selected by --no-board:
+
+      (1) Normal INL test (default)
+          • SMU / DMM are the references
+          • ADC board is the DUT
+
+      (2) Source-linearity test (--no-board)
+          • Commanded sweep is the reference
+          • SMU (and, if present, DMM) are the DUTs
     """
-    start_time = time.time()
-    next_time_update = start_time + 300  # every 5 minutes
+    start_time       = time.time()
+    next_time_update = start_time + 300                      # 5-min heartbeat
 
-    # ---------- instruments ----------
-    dmm = Dmm6500Controller(args.dmm_ip)
-    dmm.configure_for_precise_dc(nplc=5, autozero=True, dmm_range=10)
-
+    # ---------------- Instrument Setup ----------------
     smu = B2912A(args.resource)
+    dmm = None if args.no_dmm else Dmm6500Controller(args.dmm_ip)
+
+    dmm_fixed_range = 100
+    centre          = float(getattr(args, "offset", 0.0))    # volts
+    raw_amp         = float(args.amplitude)
+
+    # Ensure the sweep never exceeds the fixed DMM range +/-dmm_fixed_range.
+    max_pos_headroom = dmm_fixed_range - centre
+    max_neg_headroom = dmm_fixed_range + centre
+    safe_amp         = 2 * min(max_pos_headroom, max_neg_headroom)
+    if safe_amp <= 0:
+        raise ValueError(f"Offset {centre} V is outside the +/-{dmm_fixed_range} V "
+                         "meter range.")
+    amplitude = min(raw_amp, safe_amp)
+    v_start, v_stop = centre - amplitude / 2, centre + amplitude / 2
+
+    if dmm:
+        dmm.configure_for_precise_dc(nplc=5, autozero=True,
+                                     dmm_range=dmm_fixed_range)
+        logger.info("DMM: %d V range, 5 PLC, AZER=ON, rear terminals",
+                    dmm_fixed_range)
+    else:
+        logger.info("--no-dmm – using SMU sensed voltage only")
+
+    logger.info("Sweep: %.3f Vpp centred on %.3f V  "
+                "(start %.3f V to stop %.3f V)",
+                amplitude, centre, v_start, v_stop)
+
     smu.output_on()
 
-    amplitude = min(args.amplitude, MAX_INPUT_RANGE * 2)
-    v_start, v_stop = -amplitude / 2, +amplitude / 2
-
+    # ---------------- Sweep Grid ----------------
     steps = args.steps or DEFAULT_INL_STEPS
     runs  = args.runs  or DEFAULT_RUNS
-    sweep_voltages = np.linspace(v_start, v_stop, steps)
+    sweep_voltages = np.linspace(v_stop, v_start, steps)     # descending sweep
+
+    settle_delay_s = 0.05                                    # 50 ms guard
 
     if not args.no_board:
         ace.setup_capture(args.samples, args.odr_code)
 
-    run_stats = []   # per-run results
-    last_run_plot_data = None
+    run_stats = {"dmm": [], "smu": []}
 
     try:
         for run_idx in range(1, runs + 1):
             logger.info("=== Run %d / %d ===", run_idx, runs)
-            logger.info(
-                "DC sweep: %d steps from %.5f V to %.5f V (%.5f V step)",
-                steps, v_start, v_stop, (v_stop - v_start) / max(steps - 1, 1)
-            )
 
-            actual_v, adc_v = [], []
+            actual_v_smu, actual_v_dmm, adc_v = [], [], []
 
             for k, v in enumerate(sweep_voltages, 1):
+                # ---------- 1 – command SMU & wait deterministically ----------
+                smu.smu.write("*OPC")                         # arm completion flag
+                smu.set_voltage(v, current_limit=0.01)
+                smu.smu.query("*OPC?")                        # wait for settle
+                while True:
+                    oper = int(smu.smu.query("STAT:OPER:COND?"))
+                    if oper & 0b1 == 0:                       # bit 0 = Operation-Complete
+                        break
+                    time.sleep(0.002)
+
+                time.sleep(settle_delay_s)                    # extra 50 ms
+
+                # ---------- 2 – SMU self-measurement ----------
+                actual_v_smu.append(smu.measure_voltage())
+
+                # ---------- 3 – DMM reference ----------
+                if dmm:
+                    _ = dmm.measure_voltage_dc()              # throw-away
+                    mean_v, _, _ = dmm.measure_voltage_avg(
+                        n_avg=10, delay=0.05)
+                    actual_v_dmm.append(mean_v)
+
+                # ---------- 4 – ADC board (if enabled) ----------
+                if not args.no_board:
+                    raw = capture_samples(ace, args.samples, ADC_LSB,
+                                          output_dir=os.getcwd())
+                    adc_v.append(np.mean(raw))
+                else:
+                    # In source-linearity mode we use the *commanded* voltage
+                    # as the reference X-axis, store it in adc_v for simplicity.
+                    adc_v.append(v)
+
+                # ---------- 5 – progress heartbeat ----------
                 now = time.time()
                 if now >= next_time_update or k == steps:
-                    logger.info(
-                        "Progress: step %d/%d (%.3f V)", k, steps, v
-                    )
+                    logger.info("Step %d/%d  (%.4f V)", k, steps, v)
                     next_time_update = now + 300
-                smu.set_voltage(v, current_limit=0.01, range_mode=20)
-                smu.smu.query("*OPC?")
-                time.sleep(0.05)
 
-                mean_v, std_v, _ = dmm.measure_voltage_avg(n_avg=10,
-                                                            delay=0.05)
+                print(f"Step {k}/{steps}: Commanded {v:+.6f} V",
+                      end="\r", flush=True)
 
-                if args.no_board:
-                    continue
-
-                raw = capture_samples(
-                    ace, args.samples, ADC_LSB, output_dir=os.getcwd()
-                )
-                adc_mean = np.mean(raw)
-
-                logger.debug("DMM %.6f +/- %.2e V   ADC %.6f",
-                             mean_v, std_v, adc_mean)
-
-                actual_v.append(mean_v)
-                adc_v.append(adc_mean)
-
-            if args.no_board:
-                logger.warning("Run %d skipped ADC capture.", run_idx)
+            # ---------- per-run analysis ----------
+            if not adc_v:
+                logger.warning("No measurement data collected; skipping analysis")
                 continue
 
-            # ---------- fit / INL ----------
-            v_arr, a_arr = np.array(actual_v), np.array(adc_v)
-            gain, offset = np.polyfit(v_arr, a_arr, 1)
-            fit          = gain * v_arr + offset
-            resid        = a_arr - fit         # V
+            adc_arr = np.asarray(adc_v)                       # common X-axis
 
-            inl_lsb = resid / ADC_LSB
-            inl_ppm = resid / (MAX_INPUT_RANGE * 2) * 1e6
-            max_inl_ppm = np.max(np.abs(inl_ppm))
+            if args.no_board:
+                # --- 4-wire SMU and external DMM versus commanded sweep ---
+                def analyse_src(label, meas_v):
+                    meas_arr = np.asarray(meas_v)
+                    gain, offset = np.polyfit(adc_arr, meas_arr, 1)
+                    resid        = meas_arr - (gain * adc_arr + offset)
+                    inl_lsb      = resid / ADC_LSB
+                    inl_ppm      = resid / (MAX_INPUT_RANGE * 2) * 1e6
+                    typ_inl_ppm  = np.mean(np.abs(inl_ppm))
+                    rs = dict(label       = label,
+                              gain        = gain,
+                              offset_uV   = offset * 1e6,
+                              max_inl_ppm = np.max(np.abs(inl_ppm)),
+                              typ_inl_ppm = typ_inl_ppm,
+                              rms_inl_lsb = np.sqrt(np.mean(inl_lsb**2)))
+                    logger.info(
+                        "Run %d [%s]  Gain=%.6f  Offset=%.1f uV  "
+                        "Max|INL|=%.2f ppm  Typ|INL|=%.2f ppm",
+                        run_idx, label, gain, rs['offset_uV'],
+                        rs['max_inl_ppm'], rs['typ_inl_ppm']
+                    )
+                    plot_dc_linearity_summary(
+                        actual_v_run = adc_arr,               # commanded
+                        adc_v_run    = meas_arr,              # measured
+                        fit_line_run = gain * adc_arr + offset,
+                        inl_lsb_run  = inl_lsb,
+                        avg_gain         = gain,
+                        avg_offset_uV    = offset * 1e6,
+                        avg_max_inl_ppm  = rs['max_inl_ppm'],
+                        avg_rms_inl_lsb  = rs['rms_inl_lsb'],
+                        runs             = 1,
+                        amplitude_vpp    = amplitude,
+                        steps            = steps,
+                        out_file         = f"dc_plot_src_{label.lower()}.png",
+                        show             = getattr(args, "show_plots", False),
+                    )
+                    return rs
 
-            offset_uV = offset * 1e6
+                run_stats["smu"].append(analyse_src("SMU", actual_v_smu))
+                if dmm:
+                    run_stats["dmm"].append(analyse_src("DMM", actual_v_dmm))
 
-            run_stats.append(dict(
-                gain=gain,
-                offset_uV=offset_uV,
-                max_inl_ppm=max_inl_ppm,
-                rms_inl_lsb=np.sqrt(np.mean(inl_lsb ** 2))
-            ))
+            else:
+                # --- Normal ADC INL measurement path ---
+                def analyse(label, ref_v):
+                    v_arr = np.asarray(ref_v)
+                    gain, offset = np.polyfit(v_arr, adc_arr, 1)
+                    resid        = adc_arr - (gain * v_arr + offset)
+                    inl_lsb      = resid / ADC_LSB
+                    inl_ppm      = resid / (MAX_INPUT_RANGE * 2) * 1e6
+                    typ_inl_ppm  = np.mean(np.abs(inl_ppm))
+                    rs = dict(label       = label,
+                              gain        = gain,
+                              offset_uV   = offset * 1e6,
+                              max_inl_ppm = np.max(np.abs(inl_ppm)),
+                              typ_inl_ppm = typ_inl_ppm,
+                              rms_inl_lsb = np.sqrt(np.mean(inl_lsb**2)))
+                    logger.info(
+                        "Run %d [%s]  Gain=%.6f  Offset=%.1f uV  "
+                        "Max|INL|=%.2f ppm  Typ|INL|=%.2f ppm",
+                        run_idx, label, gain, rs['offset_uV'],
+                        rs['max_inl_ppm'], rs['typ_inl_ppm']
+                    )
+                    return rs
 
-            logger.info("Run %d:  Gain=%.6f  Offset=%.3f uV  "
-                        "Max|INL|=%.2f ppm", run_idx,
-                        gain, offset_uV, max_inl_ppm)
-            
-            if not args.no_board:
-                # Convert lists to numpy arrays if they aren't already
-                current_v_arr = np.array(actual_v)
-                current_a_arr = np.array(adc_v)
-                current_inl_lsb = np.array(inl_lsb) # Assuming inl_lsb is already a numpy array
-
-                last_run_plot_data = {
-                    'actual_v': current_v_arr,
-                    'adc_v': current_a_arr,
-                    'fit_line': gain * current_v_arr + offset, # 'gain' and 'offset' are for this specific run
-                    'inl_lsb': current_inl_lsb,
-                }
+                run_stats["smu"].append(analyse("SMU", actual_v_smu))
+                if dmm:
+                    run_stats["dmm"].append(analyse("DMM", actual_v_dmm))
 
     finally:
         smu.output_off()
         smu.close()
 
-    # ---------- aggregate ----------
-    if not run_stats:
-        logger.warning("No ADC data captured; analysis skipped.")
-        return
+    # ---------- aggregate & summary (print once per tag) ----------
+    printed_summary = set()
 
-    g  = np.mean([r["gain"]        for r in run_stats])
-    ou = np.mean([r["offset_uV"]   for r in run_stats])
-    ip = np.mean([r["max_inl_ppm"] for r in run_stats])
-    ir = np.mean([r["rms_inl_lsb"] for r in run_stats])
+    def agg(tag):
+        if tag in printed_summary or not run_stats[tag]:
+            return
+        printed_summary.add(tag)
 
-    logger.info("=== Averaged over %d runs ===", len(run_stats))
-    logger.info("Gain          : %.6f  (error %.3f %%)", g, (g - 1) * 100)
-    logger.info("Offset        : %.3f uV", ou)
-    logger.info("Max abs INL   : %.2f ppm of FS", ip)
-    logger.info("RMS INL       : %.3f LSB", ir)
+        g  = np.mean([r["gain"]        for r in run_stats[tag]])
+        ou = np.mean([r["offset_uV"]   for r in run_stats[tag]])
+        ip = np.mean([r["max_inl_ppm"] for r in run_stats[tag]])
+        ir = np.mean([r["rms_inl_lsb"] for r in run_stats[tag]])
+        tp = np.mean([r["typ_inl_ppm"] for r in run_stats[tag]])
 
-    if run_stats and last_run_plot_data:
-        logger.info("Generating DC linearity summary plot...")            
-        show_plot_flag = getattr(args, 'show_plots', False)
+        logger.info("*** %s reference (avg over %d runs) ***",
+                    tag.upper(), len(run_stats[tag]))
+        logger.info("Gain err    : %.3f %%", (g - 1) * 100)
+        logger.info("Offset      : %.1f uV", ou)
+        logger.info("Max |INL|   : %.2f ppm FS", ip)
+        logger.info("Typical |INL| : %.2f ppm FS", tp)
+        logger.info("RMS  INL    : %.3f LSB", ir)
 
-        plot_dc_linearity_summary(
-            actual_v_run=last_run_plot_data['actual_v'],
-            adc_v_run=last_run_plot_data['adc_v'],
-            fit_line_run=last_run_plot_data['fit_line'],
-            inl_lsb_run=last_run_plot_data['inl_lsb'],
-            avg_gain=g,
-            avg_offset_uV=ou,
-            avg_max_inl_ppm=ip,
-            avg_rms_inl_lsb=ir,
-            runs=len(run_stats),
-            amplitude_vpp=amplitude,  # 'amplitude' from run_dc_tests scope
-            steps=steps,              # 'steps' from run_dc_tests scope
-            out_file=(args.plot if isinstance(args.plot, str)
-                             else "dc_plot.png"),   # This will be None if output_directory is not set
-            show=show_plot_flag
-        )
-    elif not run_stats:
-        logger.warning("No run statistics available. Skipping DC linearity plot.")
-    elif not last_run_plot_data:
-        logger.warning("No plot data from the last run available. Skipping DC linearity plot.")
+    agg('dmm')
+    agg('smu')
+
 
 
 # =============================================================================
@@ -798,6 +855,8 @@ def add_common_adc_args(parser):
                         help='number of samples to capture')
     parser.add_argument('--runs', type=int, default=5,
                         help='number of repeat measurements')
+    parser.add_argument('--adc-channel', type=int, choices=[0, 1, 2, 3], default=1,
+                        help='ADC channel to use (0-3)')
 
 def add_common_plot_args(parser):
     """Plotting/display flags shared by all sub-commands."""
@@ -894,9 +953,13 @@ def setup_parsers():
         help='Total sweep amplitude [V]. Sweep is from -amplitude/2 to +amplitude/2.')
     dct.add_argument('--steps', type=int,   default=4096,
                  help='number of voltage points (default≈2 mV step)')
-    dct.set_defaults(runs=1)
+    dct.add_argument('--no-dmm', dest='no_dmm', action='store_true',
+                    help='skip DMM measurements (use ADC only)')
+    dct.add_argument('--offset', type=float, default=0.0,
+                    help='Common-mode DC offset [V] (default: 0.0 V)')
     add_common_adc_args(dct)
     add_common_plot_args(dct)
+    dct.set_defaults(runs=1, samples=4096)
 
     return p
 
@@ -928,8 +991,17 @@ def main():
     ace = None                     # only connect if we actually need the board
     if not getattr(args, 'no_board', False):
         ace = ACEClient(args.ace_host)
-        ace.configure_board(filter_code=args.filter_code,
-                            disable_channels='0,2,3')
+        # List all channels as integers
+        all_channels = [0, 1, 2, 3]
+        # Exclude the selected channel
+        disable_list = [str(ch) for ch in all_channels if ch != args.adc_channel]
+        # Join them into a string
+        disable_channels = ','.join(disable_list)
+        ace.configure_board(
+            filter_code=args.filter_code,
+            disable_channels=disable_channels
+        )
+
 
     # --- Dispatch ------------------------------------------------------------
     if   args.cmd == 'noise-floor':   run_noise_floor(args, logger, ace)

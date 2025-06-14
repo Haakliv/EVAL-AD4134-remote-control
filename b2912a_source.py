@@ -11,6 +11,19 @@ class B2912A:
         self.smu = self.rm.open_resource(resource)
         self.smu.write('*RST')
         self.smu.write('*CLS')
+        
+        self.smu.write(':SENS1:REM ON') # 4W mode
+        self.smu.write(":SENS1:CURR:PROT 0.001")
+        self.smu.write(':SENS1:CURR:RANG 0.001') # 1mA current range
+        self.smu.write(':SOUR1:VOLT:RANG:AUTO OFF') # 20V range
+        self.smu.write(':SOUR1:VOLT:RANG 20') # 20V range
+        self.smu.write(':SENS1:VOLT:RANG:AUTO OFF') # 20V range
+        self.smu.write(':SENS1:VOLT:RANG 20') # 20V range
+        self.smu.write(':OUTP1:FILT:AUTO OFF') # Disable auto filter
+        self.smu.write(':OUTP1:FILT:LPAS:STAT ON') # 
+        self.smu.write(':OUTP1:FILT:LPAS:FREQ MIN')
+        self.smu.write(':OUTP1:HCAP 1') # High capacitance output filter
+        #self.smu.write(':SENS1:VOLT:DC:NPLC 10') # 10 NPLC for voltage measurement
 
     # Configure DC voltage source on the SMU
     # param voltage: Output voltage in volts
@@ -20,20 +33,14 @@ class B2912A:
                     voltage: float,
                     current_limit: float = 0.01,
                     range_mode: str = 'AUTO'):
-        # “0 Vpp” sine with this offset → see if it’s legal
         allowed_vpp = limit_vpp_offset(requested_vpp=0.0,
                                        offset=voltage)
 
-        # If allowed_vpp < 0 then abs(offset) > max_input, so clamp
         if allowed_vpp < 0:
             safe_v = MAX_INPUT_RANGE if voltage >= 0 else -MAX_INPUT_RANGE
         else:
             safe_v = voltage
 
-        # SCPI for static voltage
-        self.smu.write('SOUR:FUNC VOLT')
-        self.smu.write(f'SENS:CURR:PROT {current_limit}')
-        self.smu.write(f'SOUR:VOLT:RANG {range_mode}')
         self.smu.write(f'SOUR:VOLT {safe_v}')
 
     def output_on(self):
@@ -41,6 +48,14 @@ class B2912A:
 
     def output_off(self):
         self.smu.write('OUTP OFF')
+
+    def write(self, command: str):
+        # Send a raw SCPI command to the SMU
+        self.smu.write(command)
+
+    def measure_voltage(self) -> float:
+        return float(self.smu.query(':MEAS:VOLT:DC?'))
+
 
     def close(self):
         try:

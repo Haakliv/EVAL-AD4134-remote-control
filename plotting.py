@@ -324,17 +324,7 @@ def plot_dc_linearity_summary(
 
     if actual_v_run.size:
         delta   = adc_v_run - actual_v_run
-        err_lo  = np.where(delta > 0,  delta, 0)
-        err_hi  = np.where(delta < 0, -delta, 0)
 
-        ax1.errorbar(
-            actual_v_run, adc_v_run,
-            yerr=[err_lo, err_hi],
-            fmt="o", ms=ms,
-            ecolor=c_error, elinewidth=lw,
-            color=c_main, capsize=2,
-            label="ADC vs. Ideal"
-        )
         ax1.plot(actual_v_run, fit_line_run,
                  c=c_main, lw=lw, label="Best-fit")
 
@@ -349,7 +339,7 @@ def plot_dc_linearity_summary(
     if inl_lsb_run.size:
         ax2.plot(
             actual_v_run, inl_lsb_run,
-            marker="o", linestyle="-",  # <-- same marker as ax1
+            marker="o", linestyle="None",  # <-- same marker as ax1
             ms=ms, lw=lw, c=c_main, label="INL"
         )
 
@@ -361,13 +351,8 @@ def plot_dc_linearity_summary(
     ax2.set_xlim(xlim)
 
     # ---------------- Title ----------------------------------------------
-    gain_err_pct = (avg_gain - 1) * 100
     fig.suptitle(
-        f"{runs}-Run DC Linearity ({steps} steps, ±{amplitude_vpp/2:.2f} V)\n"
-        f"Avg Gain {avg_gain:.6f}  (Err {gain_err_pct:+.3f} %)   "
-        f"Avg Offset {avg_offset_uV:.1f} µV   "
-        f"Avg Max|INL| {avg_max_inl_ppm:.2f} ppm   "
-        f"Avg RMS INL {avg_rms_inl_lsb:.3f} LSB",
+        f"{runs}-Run DC Linearity ({steps} steps, ±{amplitude_vpp/2:.2f} V)\n",
         fontsize=12
     )
 

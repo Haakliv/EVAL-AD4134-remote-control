@@ -107,6 +107,10 @@ class ACEClient:
         print(f"Configuring board with filter {SINC_FILTER_MAP[filter_code]}")
         # filter_code is passed directly
         code = str(filter_code)
+        disabled = [ch.strip() for ch in disable_channels.split(',') if ch.strip() != '']
+        all_channels = ['0', '1', '2', '3']
+        enabled_channels = [ch for ch in all_channels if ch not in disabled]
+        enabled_ch = enabled_channels[0]
 
         self.client.set_ContextPath(CTX_DRIVER)
         self.client.NavigateToPath(UI_DRIVER)
@@ -119,7 +123,7 @@ class ACEClient:
         self.client.Run('Evaluation.Control.SetIntParameter("virtual-parameter-power-mode",1,-1)')
         # Filter and data format settings
         self.client.Run(
-            f'Evaluation.Control.SetIntParameter("virtual-parameter-filter-ch1",{code},-1)'
+            f'Evaluation.Control.SetIntParameter("virtual-parameter-filter-ch{enabled_ch}",{code},-1)'
         )
         self.client.Run('Evaluation.Control.SetIntParameter("virtual-parameter-data-format",2,-1)')
         self.client.Run('Evaluation.Control.SetIntParameter("virtual-parameter-data-frame",2,-1)')
