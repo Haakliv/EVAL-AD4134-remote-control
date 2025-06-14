@@ -168,6 +168,12 @@ def run_sfdr(args, logger, ace):
     ace.setup_capture(n, args.odr_code)
 
     spectra = []
+    sfdr_runs = []
+    thd_runs = []
+    sinad_runs = []
+    enob_runs = []
+
+    freqs = rfftfreq(n, 1.0 / fs)
     for _ in range(1, args.runs + 1):
         raw = capture_samples(ace_client=ace,
                               sample_count=n,
@@ -179,17 +185,43 @@ def run_sfdr(args, logger, ace):
         # Find the coherent frequency bin
         spectra.append(mag)
 
+        # Calculate SFDR, THD, SINAD, ENOB for each run
+        sfdr_i, thd_i, sinad_i, enob_i = compute_dynamics(freqs, mag, k_bin, pb_hz)
+        sfdr_runs.append(sfdr_i)
+        thd_runs.append(thd_i)
+        sinad_runs.append(sinad_i)
+        enob_runs.append(enob_i)
+
     # Compute the average spectrum across all runs
     mag_avg = np.mean(spectra, axis=0)
     # Apply the window correction factor
     mag_avg = np.maximum(mag_avg, 1e-20)  # avoid log(0)
 
     # Calculate the frequency axis for the FFT
-    freqs = rfftfreq(n, 1.0 / fs)
+    # (freqs already defined above)
     sfdr, thd, sinad, enob = compute_dynamics(freqs, mag_avg, k_bin, pb_hz)
 
-    logger.info("SFDR %.2f dB, THD %.2f dB, SINAD %.2f dB, ENOB %.2f bits",
-                sfdr, thd, sinad, enob)
+    # Calculate mean, std, and 95% CI for each metric
+    def _stats(arr):
+        arr = np.array(arr)
+        mean = arr.mean()
+        std = arr.std(ddof=1) if arr.size > 1 else 0.0
+        ci95 = 1.96 * std / np.sqrt(arr.size) if arr.size > 1 else 0.0
+        return mean, std, ci95
+
+    sfdr_mean, sfdr_std, sfdr_ci = _stats(sfdr_runs)
+    thd_mean, thd_std, thd_ci = _stats(thd_runs)
+    sinad_mean, sinad_std, sinad_ci = _stats(sinad_runs)
+    enob_mean, enob_std, enob_ci = _stats(enob_runs)
+
+    logger.info("SFDR  : %.2f dB +- %.2f dB (95%% CI), std=%.2f dB over %d runs",
+                sfdr_mean, sfdr_ci, sfdr_std, len(sfdr_runs))
+    logger.info("THD   : %.2f dB +- %.2f dB (95%% CI), std=%.2f dB over %d runs",
+                thd_mean, thd_ci, thd_std, len(thd_runs))
+    logger.info("SINAD : %.2f dB +- %.2f dB (95%% CI), std=%.2f dB over %d runs",
+                sinad_mean, sinad_ci, sinad_std, len(sinad_runs))
+    logger.info("ENOB  : %.2f  +- %.2f  (95%% CI), std=%.2f over %d runs",
+                enob_mean, enob_ci, enob_std, len(enob_runs))
 
     if args.plot or args.show:
         filt_name = SINC_FILTER_MAP[args.filter_code]
@@ -206,6 +238,7 @@ def run_sfdr(args, logger, ace):
         )
 
     return sfdr, thd, sinad, enob
+
 
 
 # -- Settling‑time ------------------------------------------------------------

@@ -4,12 +4,12 @@ import time
 import socket
 import datetime
 import clr
-import AnalogDevices.Csa.Remoting.Clients as ClientsModule
 from common import SINC_FILTER_MAP, MAX_INPUT_RANGE
 
 # Add ACE Remote Control client library path
 sys.path.append(r"C:\Program Files (x86)\Analog Devices\ACE\Client")
 clr.AddReference('AnalogDevices.Csa.Remoting.Clients')
+import AnalogDevices.Csa.Remoting.Clients as ClientsModule
 
 # UI & context paths for AD4134
 UI_ROOT     = r"Root::System"

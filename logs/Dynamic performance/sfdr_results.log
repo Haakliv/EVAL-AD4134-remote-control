@@ -1,0 +1,6 @@
+2025-06-14 19:28:54,274 INFO: Starting 'sfdr' test
+2025-06-14 19:29:03,212 INFO: Dynamic performance test: tone 1000 Hz (coherent 998.756104 Hz), 7.73 Vpp-diff, 100 runs, ODR 363636 Hz, 131072 samples
+2025-06-14 19:30:32,692 INFO: SFDR  : 114.13 dB +- 0.24 dB (95% CI), std=1.22 dB over 100 runs
+2025-06-14 19:30:32,692 INFO: THD   : -108.83 dB +- 0.05 dB (95% CI), std=0.25 dB over 100 runs
+2025-06-14 19:30:32,698 INFO: SINAD : 100.36 dB +- 0.06 dB (95% CI), std=0.32 dB over 100 runs
+2025-06-14 19:30:32,698 INFO: ENOB  : 16.38  +- 0.01  (95% CI), std=0.05 over 100 runs
