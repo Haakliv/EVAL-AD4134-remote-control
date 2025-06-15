@@ -21,7 +21,7 @@ from ace_client import (
     SINC_FILTER_MAP,
 )
 from generator import WaveformGenerator
-from b2912a_source import B2912A
+from source import B2912A
 from acquisition import capture_samples
 from processing import (
     compute_settling_time,
