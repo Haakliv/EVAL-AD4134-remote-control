@@ -46,19 +46,19 @@
 2025-06-12 22:08:57,549 INFO: Step 3988/4096  (0.2009 V)
 2025-06-12 22:14:00,164 INFO: Step 4083/4096  (0.1104 V)
 2025-06-12 22:14:42,099 INFO: Step 4096/4096  (0.0980 V)
-2025-06-12 22:14:42,101 INFO: Run 1 [SMU]  Gain=0.999731  Offset=299.6 µV  Max|INL|=92.02 ppm  Typ|INL|=22.66 ppm
-2025-06-12 22:14:42,102 INFO: Run 1 [DMM]  Gain=0.999768  Offset=209.0 µV  Max|INL|=91.49 ppm  Typ|INL|=23.54 ppm
+2025-06-12 22:14:42,101 INFO: Run 1 [SMU]  Gain=0.999731  Offset=299.6 uV  Max|INL|=92.02 ppm  Typ|INL|=22.66 ppm
+2025-06-12 22:14:42,102 INFO: Run 1 [DMM]  Gain=0.999768  Offset=209.0 uV  Max|INL|=91.49 ppm  Typ|INL|=23.54 ppm
 2025-06-12 22:14:42,145 INFO: *** DMM reference (avg over 1 runs) ***
 2025-06-12 22:14:42,145 INFO: Gain err   : -0.023 %
-2025-06-12 22:14:42,145 INFO: Offset     : 209.0 µV
+2025-06-12 22:14:42,145 INFO: Offset     : 209.0 uV
 2025-06-12 22:14:42,145 INFO: Max |INL|  : 91.49 ppm FS
 2025-06-12 22:14:42,145 INFO: Typical |INL| : 23.54 ppm FS
 2025-06-12 22:14:42,145 INFO: RMS  INL   : 472.944 LSB
-2025-06-12 22:14:42,145 INFO: Generating DC-linearity summary plot…
+2025-06-12 22:14:42,145 INFO: Generating DC-linearity summary plot
 2025-06-12 22:14:43,835 INFO: *** SMU reference (avg over 1 runs) ***
 2025-06-12 22:14:43,835 INFO: Gain err   : -0.027 %
-2025-06-12 22:14:43,836 INFO: Offset     : 299.6 µV
+2025-06-12 22:14:43,836 INFO: Offset     : 299.6 uV
 2025-06-12 22:14:43,836 INFO: Max |INL|  : 92.02 ppm FS
 2025-06-12 22:14:43,837 INFO: Typical |INL| : 22.66 ppm FS
 2025-06-12 22:14:43,837 INFO: RMS  INL   : 457.757 LSB
-2025-06-12 22:14:43,837 INFO: Generating DC-linearity summary plot…
+2025-06-12 22:14:43,837 INFO: Generating DC-linearity summary plot
