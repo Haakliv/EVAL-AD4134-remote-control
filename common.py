@@ -23,9 +23,9 @@ SINC_FILTER_MAP = {
     4: 'Wideband04',
 }
 
-ADC_RES_BITS    = 24     # 24-bit ADC resolution
-MAX_INPUT_RANGE = 4.096  # ±4.096 V input range of AD4134
-ADC_SCALE = MAX_INPUT_RANGE / (2 ** (ADC_RES_BITS - 1))  # LSB weight for ±4.096 V input range
+ADC_RES_BITS    = 24
+MAX_INPUT_RANGE = 4.096
+ADC_SCALE = MAX_INPUT_RANGE / (2 ** (ADC_RES_BITS - 1))
 ADC_LSB = MAX_INPUT_RANGE / (2 ** (ADC_RES_BITS - 1))
 DEFAULT_STEP_VPP = MAX_INPUT_RANGE * 0.9
 

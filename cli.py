@@ -29,7 +29,7 @@ from processing import (
     find_spur_rms,
     compute_dynamics,
     dc_summary,
-    analyse_linearity,
+    analyze_linearity,
 )
 from plotting import (
     plot_agg_fft,
@@ -86,12 +86,12 @@ def run_noise_floor(args, logger, ace):
         stds.append(std)
 
         # Welch PSD estimate
-        f, pxx = welch(raw, fs=odr,
+        f, psd = welch(raw, fs=odr,
                        nperseg=len(raw) // 4, noverlap=len(raw) // 8)
         # Ignore DC and Nyquist
-        welch_sum = pxx if welch_sum is None else welch_sum + pxx
+        welch_sum = psd if welch_sum is None else welch_sum + psd
         # Calculate median noise spectral density (NSD)
-        nsd_med = np.median(np.sqrt(pxx)[1:-1])
+        nsd_med = np.median(np.sqrt(psd)[1:-1])
         logger.info("Run %d: mean=%.3e V, std=%.3e V, ptp=%.3e V, "
                     "NSD_med=%.3e V/sqrt(Hz)", i, mean, std, ptp, nsd_med)
 
@@ -100,11 +100,11 @@ def run_noise_floor(args, logger, ace):
     logger.info("RMS noise: %.3e V +- %.3e V", rms, spread)
 
     # Compute average PSD
-    pxx_avg = welch_sum / args.runs
+    psd_avg = welch_sum / args.runs
     # Calculate median noise spectral density (NSD)
-    nsd_avg = np.sqrt(pxx_avg)
+    nsd_avg = np.sqrt(psd_avg)
     # Calculate average noise spectral density (NSD)
-    mag_avg = np.sqrt(pxx_avg * odr / 2.0)
+    mag_avg = np.sqrt(psd_avg * odr / 2.0)
     # Calculate median NSD excluding DC and Nyquist
     med_nsd = np.median(nsd_avg[1:-1])
     logger.info("Median NSD: %.3e V/sqrt(Hz)", med_nsd)
@@ -127,7 +127,7 @@ def run_noise_floor(args, logger, ace):
                 out_file='agg_hist.png', show=args.show
             )
         if args.fft:
-            mag = np.sqrt(pxx_avg * odr / 2)
+            mag = np.sqrt(psd_avg * odr / 2)
             plot_agg_fft(
                 f, mag, args.runs, odr, filt,
                 out_file='agg_fft.png', show=args.show
@@ -139,33 +139,33 @@ def run_noise_floor(args, logger, ace):
 # -------------------------------------------------------------------------
 def run_sfdr(args, logger, ace):
     fs = SLAVE_ODR_MAP[args.odr_code]
-    n = args.samples
-    pb_hz = 69793  # -3 dB bandwidth in Hz at ODR_code 7 (375 kSPS)
+    samples = args.samples
+    passband_bw_hz = 69793  # -3 dB bandwidth in Hz at ODR_code 7 (375 kSPS)
 
-    k_bin = int(round(args.freq * n / fs))
-    f_coh = k_bin * fs / n  # Actual coherent frequency
+    k_bin = int(round(args.freq * samples / fs))
+    f_coh = k_bin * fs / samples  # Actual coherent frequency
 
-    a = [0.2712203606, 0.4334446123, 0.21800412,
+    window_coefficients = [0.2712203606, 0.4334446123, 0.21800412,
          0.0657853433, 0.0107618673, 0.0007700125,
          0.0000136809]  # Coefficients for 7-term window
     # Ensure the coefficients sum to 1
-    k_vec = np.arange(n)
+    sample_indices = np.arange(samples)
     # Apply the window to the FFT
-    win = np.sum([a[m] * np.cos(2.0 * np.pi * m * (k_vec - n / 2) / n)
+    window = np.sum([window_coefficients[m] * np.cos(2.0 * np.pi * m * (sample_indices - samples / 2) / samples)
                   for m in range(7)], axis=0)
     # Normalize the window
-    wc = win.sum() / n
+    window_correction_factor = window.sum() / samples
 
     logger.info("Dynamic performance test: tone %.0f Hz (coherent %.6f Hz), %.2f Vpp-diff, "
                 "%d runs, ODR %.0f Hz, %d samples",
                 args.freq, f_coh, args.amplitude,
-                args.runs, fs, n)
+                args.runs, fs, samples)
 
     if args.no_board:
         logger.warning("--no-board specified; skipping ADC capture")
         return None, None, None, None
 
-    ace.setup_capture(n, args.odr_code)
+    ace.setup_capture(samples, args.odr_code)
 
     spectra = []
     sfdr_runs = []
@@ -173,33 +173,33 @@ def run_sfdr(args, logger, ace):
     sinad_runs = []
     enob_runs = []
 
-    freqs = rfftfreq(n, 1.0 / fs)
+    freqs = rfftfreq(samples, 1.0 / fs)
     for _ in range(1, args.runs + 1):
         raw = capture_samples(ace_client=ace,
-                              sample_count=n,
+                              sample_count=samples,
                               output_dir=os.getcwd())
         # Apply the window to the raw data
-        spec = rfft(raw * win)
+        spec = rfft(raw * window)
         # Scale the FFT output
-        mag = 2.0 * np.abs(spec) / (n * wc) / np.sqrt(2.0)  # Vrms / bin
+        fft_magnitude = 2.0 * np.abs(spec) / (samples * window_correction_factor) / np.sqrt(2.0)  # Vrms / bin
         # Find the coherent frequency bin
-        spectra.append(mag)
+        spectra.append(fft_magnitude)
 
         # Calculate SFDR, THD, SINAD, ENOB for each run
-        sfdr_i, thd_i, sinad_i, enob_i = compute_dynamics(freqs, mag, k_bin, pb_hz)
+        sfdr_i, thd_i, sinad_i, enob_i = compute_dynamics(freqs, fft_magnitude, k_bin, passband_bw_hz)
         sfdr_runs.append(sfdr_i)
         thd_runs.append(thd_i)
         sinad_runs.append(sinad_i)
         enob_runs.append(enob_i)
 
     # Compute the average spectrum across all runs
-    mag_avg = np.mean(spectra, axis=0)
+    fft_magnitude_avg = np.mean(spectra, axis=0)
     # Apply the window correction factor
-    mag_avg = np.maximum(mag_avg, 1e-20)  # avoid log(0)
+    fft_magnitude_avg = np.maximum(fft_magnitude_avg, 1e-20)  # avoid log(0)
 
     # Calculate the frequency axis for the FFT
     # (freqs already defined above)
-    sfdr, thd, sinad, enob = compute_dynamics(freqs, mag_avg, k_bin, pb_hz)
+    sfdr, thd, sinad, enob = compute_dynamics(freqs, fft_magnitude_avg, k_bin, passband_bw_hz)
 
     # Calculate mean, std, and 95% CI for each metric
     def _stats(arr):
@@ -226,7 +226,7 @@ def run_sfdr(args, logger, ace):
     if args.plot or args.show:
         filt_name = SINC_FILTER_MAP[args.filter_code]
         plot_fft_with_metrics(
-            freqs, mag_avg, fs,
+            freqs, fft_magnitude_avg, fs,
             sfdr, thd, sinad, enob,
             runs=args.runs,
             tone_freq=f_coh,
@@ -234,7 +234,7 @@ def run_sfdr(args, logger, ace):
             filt=filt_name,
             out_file="sfdr_fft.png",
             show=args.show,
-            xlim=(0.0, pb_hz / KILO),
+            xlim=(0.0, passband_bw_hz / KILO),
         )
 
     return sfdr, thd, sinad, enob
@@ -257,7 +257,7 @@ def run_settling_time(args, logger, ace):
 
     gen = WaveformGenerator(args.sdg_host, "PULSE", args.offset)
     gen.pulse_diff(args.frequency, args.amplitude,
-                   low_pct=50.0, edge_time=2e-9)
+                   low_percent=50.0, edge_time=2e-9)
     time.sleep(0.5)
 
     raw_runs = []
@@ -396,8 +396,8 @@ def run_freq_response(args, logger, ace):
 
     power_runs = np.zeros((args.runs, args.points), dtype=np.float64)
 
-    for run_idx in range(args.runs):
-        logger.info("Run %d / %d", run_idx + 1, args.runs)
+    for current_run in range(args.runs):
+        logger.info("Run %d / %d", current_run + 1, args.runs)
         for i, f in enumerate(freqs):
             _, vrms = measure_tone(
                 ace, wave_gen, f, odr_hz,
@@ -405,7 +405,7 @@ def run_freq_response(args, logger, ace):
                 args.settle_cycles, args.capture_cycles,
                 logger
             )
-            power_runs[run_idx, i] = vrms ** 2  # Store power
+            power_runs[current_run, i] = vrms ** 2  # Store power
 
     wave_gen.disable(1)
     wave_gen.disable(2)
@@ -422,12 +422,12 @@ def run_freq_response(args, logger, ace):
     # Convert to dB
     gdb_norm = 20 * np.log10(gains_norm)
 
-    idx = np.where(gdb_norm <= -3.0)[0]
-    if idx.size:
-        k = idx[0]
+    bandwidth_indices = np.where(gdb_norm <= -3.0)[0]
+    if bandwidth_indices.size:
+        crossing_idx = bandwidth_indices[0]
         f3db = np.interp(-3.0,
-                         [gdb_norm[k - 1], gdb_norm[k]],
-                         [freqs[k - 1], freqs[k]])
+                         [gdb_norm[crossing_idx - 1], gdb_norm[crossing_idx]],
+                         [freqs[crossing_idx - 1], freqs[crossing_idx]])
         logger.info(
             "-3 dB bandwidth: %.0f Hz  (mean of %d runs, 95%% CI shown below)",
             f3db, args.runs
@@ -436,13 +436,13 @@ def run_freq_response(args, logger, ace):
         logger.info("-3 dB point not in sweep range")
 
     passband_db = gdb_norm[freqs < 1000]  # First decade
-    mu = passband_db.mean()
-    s = passband_db.std(ddof=1)
-    ci95 = 1.96 * s / np.sqrt(len(passband_db))
+    passband_mean = passband_db.mean()
+    std = passband_db.std(ddof=1)
+    ci95 = 1.96 * std / np.sqrt(len(passband_db))
     logger.info(
         "Pass-band gain: %.2f dB +- %.2f dB (95%% CI), "
         "std = %.2f dB over %d runs",
-        mu, ci95, s, args.runs
+        passband_mean, ci95, std, args.runs
     )
 
     plot_freq_response(freqs,
@@ -473,7 +473,7 @@ def run_dc_tests(args, logger, ace):
         raise ValueError(f"Offset {centre} V is outside the +/-{dmm_fixed_range} V "
                          "meter range.")
     amplitude = min(raw_amp, safe_amp)
-    v_start, v_stop = centre - amplitude / 2, centre + amplitude / 2
+    voltage_start, voltage_stop = centre - amplitude / 2, centre + amplitude / 2
 
     if dmm:
         dmm.configure_for_precise_dc(nplc=5,
@@ -485,13 +485,13 @@ def run_dc_tests(args, logger, ace):
 
     logger.info("Sweep: %.3f Vpp centred on %.3f V  "
                 "(start %.3f V to stop %.3f V)",
-                amplitude, centre, v_start, v_stop)
+                amplitude, centre, voltage_start, voltage_stop)
 
     smu.output_on()
 
     steps = args.steps or DEFAULT_INL_STEPS
     runs = args.runs or DEFAULT_RUNS
-    sweep_voltages = np.linspace(v_stop, v_start, steps)  # descending sweep
+    sweep_voltages = np.linspace(voltage_stop, voltage_start, steps)  # descending sweep
 
     settle_delay_s = 0.05  # 50 ms guard
 
@@ -502,13 +502,13 @@ def run_dc_tests(args, logger, ace):
 
     try:
         for run_idx in range(1, runs + 1):
-            logger.info("=== Run %d / %d ===", run_idx, runs)
+            logger.info("Run %d / %d", run_idx, runs)
 
             actual_v_smu, actual_v_dmm, adc_v = [], [], []
 
-            for k, v in enumerate(sweep_voltages, 1):
+            for steps, voltage in enumerate(sweep_voltages, 1):
                 # Command SMU & wait
-                smu.set_voltage_blocking(v)
+                smu.set_voltage_blocking(voltage)
                 while int(smu.smu.query("STAT:OPER:COND?")) & 0b1:
                     time.sleep(0.002)
                 time.sleep(settle_delay_s)  # extra 50 ms
@@ -528,14 +528,14 @@ def run_dc_tests(args, logger, ace):
                                         output_dir=os.getcwd())
                     adc_v.append(np.mean(raw))
                 else:
-                    adc_v.append(v)
+                    adc_v.append(voltage)
 
                 # Progress heartbeat
                 now = time.time()
-                if now >= next_time_update or k == steps:
-                    logger.info("Step %d/%d  (%.4f V)", k, steps, v)
+                if now >= next_time_update or steps == steps:
+                    logger.info("Step %d/%d  (%.4f V)", steps, steps, voltage)
                     next_time_update = now + 300
-                print(f"Step {k}/{steps}: Commanded {v:+.6f} V", end="\r", flush=True)
+                print(f"Step {steps}/{steps}: Commanded {voltage:+.6f} V", end="\r", flush=True)
 
             if not adc_v:
                 logger.warning("No data collected; skipping analysis")
@@ -546,100 +546,99 @@ def run_dc_tests(args, logger, ace):
 
             if args.no_board:
                 # Source-linearity mode (commanded voltage is X-axis)
-                res = analyse_linearity(adc_arr, np.asarray(actual_v_smu), "SMU")
+                result = analyze_linearity(adc_arr, np.asarray(actual_v_smu), "SMU")
                 logger.info(
                     "Run %d [SMU]  Gain=%.6f  Offset=%.1f µV  "
                     "Max|INL|=%.2f ppm  Typ|INL|=%.2f ppm",
-                    run_idx, res["gain"], res["offset_uV"],
-                    res["max_inl_ppm"], res["typ_inl_ppm"]
+                    run_idx, result["gain"], result["offset_uV"],
+                    result["max_inl_ppm"], result["typ_inl_ppm"]
                 )
                 if show_plot:
                     plot_dc_linearity_summary(
                         actual_v_run=adc_arr,
-                        fit_line_run=res["fit_line"],
-                        inl_lsb_run=res["inl_lsb"],
+                        fit_line_run=result["fit_line"],
+                        inl_lsb_run=result["inl_lsb"],
                         runs=1, amplitude_vpp=amplitude, steps=steps,
                         out_file="dc_plot_src_smu.png", show=True
                     )
-                run_stats["smu"].append(res)
+                run_stats["smu"].append(result)
 
                 if dmm:
-                    res = analyse_linearity(adc_arr, np.asarray(actual_v_dmm), "DMM")
+                    result = analyze_linearity(adc_arr, np.asarray(actual_v_dmm), "DMM")
                     logger.info(
                         "Run %d [DMM] Gain=%.6f  Offset=%.1f µV  "
                         "Max|INL|=%.2f ppm  Typ|INL|=%.2f ppm",
-                        run_idx, res["gain"], res["offset_uV"],
-                        res["max_inl_ppm"], res["typ_inl_ppm"]
+                        run_idx, result["gain"], result["offset_uV"],
+                        result["max_inl_ppm"], result["typ_inl_ppm"]
                     )
                     if show_plot:
                         plot_dc_linearity_summary(
                             actual_v_run=adc_arr,
-                            fit_line_run=res["fit_line"],
-                            inl_lsb_run=res["inl_lsb"],
+                            fit_line_run=result["fit_line"],
+                            inl_lsb_run=result["inl_lsb"],
                             runs=1, amplitude_vpp=amplitude, steps=steps,
                             out_file="dc_plot_src_dmm.png", show=True
                         )
-                    run_stats["dmm"].append(res)
+                    run_stats["dmm"].append(result)
 
             else:
                 # Normal ADC INL mode (reference voltage is X-axis)
-                res = analyse_linearity(np.asarray(actual_v_smu), adc_arr, "SMU")
+                result = analyze_linearity(np.asarray(actual_v_smu), adc_arr, "SMU")
                 logger.info(
                     "Run %d [SMU]  Gain=%.6f  Offset=%.1f uV  "
                     "Max|INL|=%.2f ppm  Typ|INL|=%.2f ppm",
-                    run_idx, res["gain"], res["offset_uV"],
-                    res["max_inl_ppm"], res["typ_inl_ppm"]
+                    run_idx, result["gain"], result["offset_uV"],
+                    result["max_inl_ppm"], result["typ_inl_ppm"]
                 )
                 if show_plot:
                     plot_dc_linearity_summary(
                         actual_v_run=np.asarray(actual_v_smu),
-                        fit_line_run=res["fit_line"],
-                        inl_lsb_run=res["inl_lsb"],
+                        fit_line_run=result["fit_line"],
+                        inl_lsb_run=result["inl_lsb"],
                         runs=1, amplitude_vpp=amplitude, steps=steps,
                         out_file="dc_plot_smu.png", show=True
                     )
-                run_stats["smu"].append(res)
+                run_stats["smu"].append(result)
 
                 if dmm:
-                    res = analyse_linearity(np.asarray(actual_v_dmm), adc_arr, "DMM")
+                    result = analyze_linearity(np.asarray(actual_v_dmm), adc_arr, "DMM")
                     logger.info(
                         "Run %d [DMM]  Gain=%.6f  Offset=%.1f uV  "
                         "Max|INL|=%.2f ppm  Typ|INL|=%.2f ppm",
-                        run_idx, res["gain"], res["offset_uV"],
-                        res["max_inl_ppm"], res["typ_inl_ppm"]
+                        run_idx, result["gain"], result["offset_uV"],
+                        result["max_inl_ppm"], result["typ_inl_ppm"]
                     )
                     if show_plot:
                         plot_dc_linearity_summary(
                             actual_v_run=np.asarray(actual_v_dmm),
-                            fit_line_run=res["fit_line"],
-                            inl_lsb_run=res["inl_lsb"],
+                            fit_line_run=result["fit_line"],
+                            inl_lsb_run=result["inl_lsb"],
                             runs=1, amplitude_vpp=amplitude, steps=steps,
                             out_file="dc_plot_dmm.png", show=True
                         )
-                    run_stats["dmm"].append(res)
+                    run_stats["dmm"].append(result)
     finally:
         smu.output_off()
         smu.close()
 
     for tag in ("dmm", "smu"):
-        s = dc_summary(tag, run_stats)
-        if s is None:
+        stats = dc_summary(tag, run_stats)
+        if stats is None:
             continue
 
         logger.info("*** %s reference (avg over %d runs) ***",
-                    tag.upper(), s["runs"])
-        logger.info("Gain err      : %.3f %%", s["gain_err_pct"])
-        logger.info("Offset        : %.1f µV", s["offset_uV"])
-        logger.info("Max |INL|     : %.2f ppm FS", s["max_inl_ppm"])
-        logger.info("Typical |INL| : %.2f ppm FS", s["typ_inl_ppm"])
-        logger.info("RMS  INL      : %.3f LSB", s["rms_inl_lsb"])
+                    tag.upper(), stats["runs"])
+        logger.info("Gain err      : %.3f %%", stats["gain_err_pct"])
+        logger.info("Offset        : %.1f µV", stats["offset_uV"])
+        logger.info("Max |INL|     : %.2f ppm FS", stats["max_inl_ppm"])
+        logger.info("Typical |INL| : %.2f ppm FS", stats["typ_inl_ppm"])
+        logger.info("RMS  INL      : %.3f LSB", stats["rms_inl_lsb"])
 
 
 # =============================================================================
 # Argument-parser construction
 # =============================================================================
 def add_common_adc_args(parser):
-    """ADC-related flags shared by all sub-commands."""
     parser.add_argument('--ace-host', dest='ace_host', type=str,
                         default=ACE_HOST_DEFAULT, help='ACE server address')
     parser.add_argument('--odr-code', type=int, choices=list(SLAVE_ODR_MAP.keys()),
@@ -662,7 +661,6 @@ def add_common_adc_args(parser):
 
 
 def add_common_plot_args(parser):
-    """Plotting/display flags shared by all sub-commands."""
     parser.add_argument('--plot', action='store_true', help='save plots to files')
     parser.add_argument('--show', action='store_true', help='display plots on screen')
 

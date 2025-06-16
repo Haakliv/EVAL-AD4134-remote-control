@@ -32,7 +32,7 @@ class WaveformGenerator:
         self,
         frequency: float,
         amplitude: float,
-        low_pct: float = 80.0, # 4 ms low, 1 ms high at 200 Hz
+        low_percent: float = 80.0, # 4 ms low, 1 ms high at 200 Hz
         edge_time: float = 2e-9,
         ch_pos: int = 1,
         ch_neg: int = 2,
@@ -42,7 +42,7 @@ class WaveformGenerator:
         if safe_vpp <= 0:
             raise ValueError("Offset too close to rail for given Vpp")
 
-        high_pct = 100.0 - low_pct  # SDG’s DUTY = %HIGH
+        duty_cycle_percent = 100.0 - low_percent  # SDG’s DUTY = %HIGH
 
         for ch in (ch_pos, ch_neg):
             self.sdg.set_frequency(frequency, ch)
@@ -51,7 +51,7 @@ class WaveformGenerator:
             # 50 ohm load
             self.sdg.interface.write(f"C{ch}:OUTP LOAD,50")
 
-            self.sdg.interface.write(f"C{ch}:BSWV DUTY,{high_pct}")
+            self.sdg.interface.write(f"C{ch}:BSWV DUTY,{duty_cycle_percent}")
             self.sdg.interface.write(f"C{ch}:BSWV DLY,0")
             self.sdg.interface.write(f"C{ch}:BSWV RISE,{edge_time}")
             self.sdg.interface.write(f"C{ch}:BSWV FALL,{edge_time}")

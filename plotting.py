@@ -71,8 +71,8 @@ def plot_freq_response(
 ):
     
     plt.figure()
-    gd_b = 20 * np.log10(gains)
-    plt.semilogx(freqs, gd_b, label="Mean")
+    gain_db = 20 * np.log10(gains)
+    plt.semilogx(freqs, gain_db, label="Mean")
 
     plt.xlabel("Frequency [Hz]")
     plt.ylabel("Gain [dB]")
@@ -99,7 +99,6 @@ def plot_agg_histogram(
     out_file=None,
     show=False
 ):
-    
     lsb      = MAX_INPUT_RANGE / (2 ** (ADC_RES_BITS - 1))
     lsb_u_v   = lsb * MICRO
 
@@ -107,10 +106,10 @@ def plot_agg_histogram(
 
     # Choose code-aligned bin edges
     n_codes  = codes.max() - codes.min() + 1
-    grp_size = max(1, int(np.ceil(n_codes / bins)))
+    group_size = max(1, int(np.ceil(n_codes / bins)))
     edges_c  = np.arange(codes.min() - 0.5,
-                         codes.max() + 0.5 + grp_size,
-                         grp_size)
+                         codes.max() + 0.5 + group_size,
+                         group_size)
 
     edges_u_v = edges_c * lsb_u_v
 
@@ -159,7 +158,7 @@ def plot_agg_histogram(
 
 def plot_agg_fft(
     freqs,
-    mag,
+    magnitude,
     runs,
     odr,
     filt,
@@ -167,14 +166,14 @@ def plot_agg_fft(
     show=False,
     xmin_hz=5e3
 ):
-    mags_db = 20*np.log10(np.maximum(mag, np.finfo(float).tiny))
+    magnitudes_db = 20*np.log10(np.maximum(magnitude, np.finfo(float).tiny))
 
-    keep          = freqs >= xmin_hz
-    freqs_plot    = freqs[keep] / KILO
-    mags_db_plot  = mags_db[keep]
+    keep               = freqs >= xmin_hz
+    freqs_plot         = freqs[keep] / KILO
+    magnitudes_db_plot = magnitudes_db[keep]
 
     _, ax = plt.subplots()
-    ax.plot(freqs_plot, mags_db_plot, lw=0.8)
+    ax.plot(freqs_plot, magnitudes_db_plot, lw=0.8)
     ax.set_xlabel('Frequency [kHz]')
     ax.set_ylabel('Magnitude [dBV]')
     ax.set_title(f"{runs}-run Noise Floor PSD @ {odr/MICRO:.1f} MHz - {filt}")
@@ -182,8 +181,8 @@ def plot_agg_fft(
     ax.grid(True, which='both', linestyle='--', linewidth=0.4)
 
     # y-limit padding
-    pad = 0.10 * (mags_db_plot.max() - mags_db_plot.min())
-    ax.set_ylim(mags_db_plot.min() - pad, mags_db_plot.max() + pad)
+    pad = 0.10 * (magnitudes_db_plot.max() - magnitudes_db_plot.min())
+    ax.set_ylim(magnitudes_db_plot.min() - pad, magnitudes_db_plot.max() + pad)
 
     plt.tight_layout()
     if out_file:
@@ -208,11 +207,11 @@ def plot_fft_with_metrics(
     xlim: tuple[float, float] | None = None,
 ):
     # dB scale, referenced to 1 Vrms
-    mag_db = 20.0 * np.log10(np.maximum(mag, np.finfo(float).tiny))
+    magnitude_db = 20.0 * np.log10(np.maximum(mag, np.finfo(float).tiny))
     f_khz  = freqs / KILO
 
     fig, ax = plt.subplots(figsize=(9, 4))
-    ax.plot(f_khz, mag_db, lw=0.9, label="Averaged spectrum")
+    ax.plot(f_khz, magnitude_db, lw=0.9, label="Averaged spectrum")
 
     ax.set_xlabel("Frequency [kHz]")
     ax.set_ylabel("Magnitude [dBV]")
@@ -251,9 +250,9 @@ def plot_dc_linearity_summary(
     out_file: str | None = None,
     show: bool = False,
 ):
-    lw = 1.5
-    ms = 4 # marker size (points)
-    c_main, c_ideal, c_error = "C0", "gray", "black"
+    line_width = 1.5
+    marker_size = 4
+    c_main, c_ideal = "C0", "gray"
 
     fig, axs = plt.subplots(
         2, 1, figsize=(10, 8), sharex=True,
@@ -268,11 +267,11 @@ def plot_dc_linearity_summary(
         xlim = (-1, 1)
 
     ax1 = axs[0]
-    ax1.plot(xlim, xlim, c=c_ideal, ls="--", lw=lw, label="Ideal (y=x)")
+    ax1.plot(xlim, xlim, c=c_ideal, ls="--", lw=line_width, label="Ideal (y=x)")
 
     if actual_v_run.size:
         ax1.plot(actual_v_run, fit_line_run,
-                 c=c_main, lw=lw, label="Best-fit")
+                 c=c_main, lw=line_width, label="Best-fit")
 
     ax1.set_ylabel("ADC Output [V]")
     ax1.grid(ls=":", lw=0.5, alpha=0.7)
@@ -285,10 +284,10 @@ def plot_dc_linearity_summary(
         ax2.plot(
             actual_v_run, inl_lsb_run,
             marker="o", linestyle="None",
-            ms=ms, lw=lw, c=c_main, label="INL"
+            ms=marker_size, lw=line_width, c=c_main, label="INL"
         )
 
-    ax2.axhline(0, c=c_ideal, ls="--", lw=lw)
+    ax2.axhline(0, c=c_ideal, ls="--", lw=line_width)
     ax2.set_xlabel("Actual Input [V]")
     ax2.set_ylabel("INL [LSB]")
     ax2.grid(ls=":", lw=0.5, alpha=0.7)

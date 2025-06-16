@@ -23,11 +23,11 @@ def compute_settling_time(
         return None, None, None
 
     # Estimate the final value from a later window
-    idx0 = int(settling_start + final_offset_us  / ts_us)
-    idx1 = int(idx0            + final_duration_us/ ts_us)
-    if idx1 > len(raw):
+    i0 = int(settling_start + final_offset_us  / ts_us)
+    i1 = int(i0            + final_duration_us/ ts_us)
+    if i1 > len(raw):
         return None, None, None
-    final_val = float(raw[idx0:idx1].mean())
+    final_val = float(raw[i0:i1].mean())
 
     # Find the first index i where the next N samples are all within ±thr of final_val
     settling_end = None
@@ -66,9 +66,9 @@ def compute_mean_settling_time(
     total_len = pre_samps + delta_samps + post_samps
 
     aligned = []
-    for raw, s_idx in zip(raw_runs, start_idxs):
+    for raw, s_i in zip(raw_runs, start_idxs):
         # Extract segment around the start index
-        seg = raw[s_idx - pre_samps : s_idx - pre_samps + total_len]
+        seg = raw[s_i - pre_samps : s_i - pre_samps + total_len]
         aligned.append(seg)
     aligned = np.vstack(aligned)
 
@@ -116,7 +116,7 @@ def compute_dynamics(freq_axis, mag_vec, k_fund, passband_hz,
     mask = np.ones_like(mag_vec, dtype=bool)
     mask[:dc_bins] = False # DC guard
     mask[max(0, k_fund - main_bins):k_fund + main_bins + 1] = False  # Fundamental
-    for h in range(2, h + 1): # H2..H5
+    for h in range(2, h + 1): # H2...H5
         bin_h = h * k_fund
         if bin_h < len(mask):
             mask[max(0, bin_h - main_bins):bin_h + main_bins + 1] = False
@@ -142,31 +142,31 @@ def dc_summary(tag: str,
     if not run_stats.get(tag):
         return None
 
-    g  = np.mean([r["gain"]        for r in run_stats[tag]])
-    ou = np.mean([r["offset_uV"]   for r in run_stats[tag]])
-    ip = np.mean([r["max_inl_ppm"] for r in run_stats[tag]])
-    ir = np.mean([r["rms_inl_lsb"] for r in run_stats[tag]])
-    tp = np.mean([r["typ_inl_ppm"] for r in run_stats[tag]])
+    gain  = np.mean([r["gain"]        for r in run_stats[tag]])
+    offset_uv = np.mean([r["offset_uV"]   for r in run_stats[tag]])
+    inl_max_ppm = np.mean([r["max_inl_ppm"] for r in run_stats[tag]])
+    inl_rms_lsb = np.mean([r["rms_inl_lsb"] for r in run_stats[tag]])
+    inl_typ_ppm = np.mean([r["typ_inl_ppm"] for r in run_stats[tag]])
 
     return {
         "runs"          : len(run_stats[tag]),
-        "gain_err_pct"  : (g - 1.0) * 100.0,
-        "offset_uV"     : ou,
-        "max_inl_ppm"   : ip,
-        "typ_inl_ppm"   : tp,
-        "rms_inl_lsb"   : ir,
+        "gain_err_pct"  : (gain - 1.0) * 100.0,
+        "offset_uV"     : offset_uv,
+        "max_inl_ppm"   : inl_max_ppm,
+        "typ_inl_ppm"   : inl_typ_ppm,
+        "rms_inl_lsb"   : inl_rms_lsb,
     }
 
-def analyse_linearity(x: np.ndarray,
+def analyze_linearity(x: np.ndarray,
                       y: np.ndarray,
                       label: str) -> dict[str, float | np.ndarray]:
 
     gain, offset = np.polyfit(x, y, 1)
     fit_line = gain * x + offset
-    resid    = y - fit_line
+    residual    = y - fit_line
 
-    inl_lsb = resid / ADC_LSB
-    inl_ppm = resid / (MAX_INPUT_RANGE * 2) * MICRO
+    inl_lsb = residual / ADC_LSB
+    inl_ppm = residual / (MAX_INPUT_RANGE * 2) * MICRO
 
     return {
         "label"      : label,

@@ -17,14 +17,14 @@ class Dmm6500Controller:
         self.dmm.interface.write(":SENS:VOLT:DC:AVER:STAT OFF") # Disable averaging    
 
     def measure_voltage_avg(self, n_avg=10, delay=0.05):
-        vals = []
+        values = []
         for _ in range(n_avg):
             v = self.dmm.measure_voltage_dc()
-            vals.append(v)
+            values.append(v)
             time.sleep(delay)
-        mean = np.mean(vals)
-        std = np.std(vals)
-        return mean, std, vals
+        mean = np.mean(values)
+        std = np.std(values)
+        return mean, std, values
     
     def measure_voltage_dc(self):
         return self.dmm.interface.query(":MEAS:VOLT:DC?")
