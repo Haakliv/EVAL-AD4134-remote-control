@@ -32,6 +32,7 @@ The logs and results presented in the thesis are stored in subfolders within the
 ---
 
 ## Installation
+Requires a working installation of Analog Devices ACE (Windows only) and access to the Zolve-instruments library.
 
 ```bash
-pip install -r requirements.txt   # includes zolve-instruments and PyVISA-py
+pip install -r requirements.txt
