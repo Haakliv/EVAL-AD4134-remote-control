@@ -9,23 +9,25 @@ The toolkit utilizes:
 
 The SDG6022X and DMM6500 instruments are accessed over LAN/USB using the *zolve-instruments* PyVISA wrappers. The B2912A is controlled using a custom PyVISA wrapper.
 
+The logs and results presented in the thesis are stored in subfolders within the **`logs/`** directory.
+
 ---
 
 ## Repository layout
 
-| File / module        | Purpose                                                                                                                                                    |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **`ace_client.py`**  | Thin wrapper for remote control of Analog Devices ACE.                                                                                                     |
-| **`acgain.py`**      | Stand-alone script to estimate AC gain of the AFE                                                                                                          |
-| **`acquisition.py`** | Capture and decode raw samples via `ace_client`                                                                                                            |
-| **`cli.py`**         | Command-line front-end. Implements test routines: noise, DC gain/offset, INL, frequency response, dynamic performance (SFDR / THD / ENOB), settling time   |
-| **`common.py`**      | Project-wide constants and utility functions                                                                                                               |
-| **`generator.py`**   | Control of the Siglent SDG6022X waveform generator                                                                                                         |
-| **`multimeter.py`**  | Control of the Keithley DMM6500                                                                                                                            |
-| **`source.py`**      | Control of the Agilent B2912A SMU                                                                                                                          |
-| **`plotting.py`**    | Common plotting helpers                                                                                                                                    |
-| **`processing.py`**  | Numeric post-processing of captured data                                                                                                                   |
-| **`logs/`**          | Test logs (one sub-folder per run)                                                                                                                         |
+| File / module        | Purpose                                                                                                                                                  |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`ace_client.py`**  | Thin wrapper for remote control of Analog Devices ACE.                                                                                                   |
+| **`acgain.py`**      | Stand-alone script to estimate AC gain of the AFE                                                                                                        |
+| **`acquisition.py`** | Capture and decode raw samples via `ace_client`                                                                                                          |
+| **`cli.py`**         | Command-line front-end. Implements test routines: noise, DC gain/offset, INL, frequency response, dynamic performance (SFDR / THD / ENOB), settling time |
+| **`common.py`**      | Project-wide constants and utility functions                                                                                                             |
+| **`generator.py`**   | Control of the Siglent SDG6022X waveform generator                                                                                                       |
+| **`multimeter.py`**  | Control of the Keithley DMM6500                                                                                                                          |
+| **`source.py`**      | Control of the Agilent B2912A SMU                                                                                                                        |
+| **`plotting.py`**    | Common plotting helpers                                                                                                                                  |
+| **`processing.py`**  | Numeric post-processing of captured data                                                                                                                 |
+| **`logs/`**          | Test logs (one sub-folder per run)                                                                                                                       |
 
 ---
 
