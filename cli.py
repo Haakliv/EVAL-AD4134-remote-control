@@ -247,13 +247,7 @@ def run_settling_time(args, logger, ace):
     filt = SINC_FILTER_MAP[args.filter_code]
     ts_us = MICRO / odr
 
-    # +-1 LSB_eff band  (= 60 uV @ 1.25 MSPS, 17.3 ENOB)
-    # The 17.3 ENOB came from an early datasheet estimate.  The measured ENOB is
-    # 16.4 bits, which widens the ±1 LSB_eff band by only ≈8 µV.  This difference is
-    # negligible compared with (a) the 0.8 µs sample period that quantises the
-    # time axis and (b) the ±0.4 µs timing uncertainty in each run, so it does not
-    # affect the settling-time pass/fail decision.
-    lsb_eff_u_v = 2 * MAX_INPUT_RANGE / 2 ** 17.3
+    lsb_eff_u_v = 2 * MAX_INPUT_RANGE / 2 ** 17.3 # 17.3 ENOB, see thesis for why this is used
 
     logger.info("Settling test: ODR=%.0fHz, %s, runs=%d, Vpp=%.2f, freq=%.1fHz",
                 odr, filt, args.runs, args.amplitude, args.frequency)
